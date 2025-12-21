@@ -77,7 +77,7 @@ async function renderMarkdown(markdown, object) {
         if (!res.ok) throw new Error('Delete failed');
     }
 
-    function createModal() {
+    function createImageModal() {
         const modal = document.createElement('div');
         modal.className = 'image-picker-modal';
         modal.innerHTML = `
@@ -218,7 +218,7 @@ async function renderMarkdown(markdown, object) {
     }
 
     async function openImagePicker(onSelect) {
-        const modal = createModal();
+        const modal = createImageModal();
         const grid = modal.querySelector('.image-grid');
 
         try {
@@ -240,6 +240,69 @@ async function renderMarkdown(markdown, object) {
         window.onSelect = onSelect;
         window.modal = modal;
     }
+
+    async function openComparisonBuilder(onSelect) {
+        const modal = document.createElement('div');
+        modal.className = 'image-picker-modal';
+        modal.innerHTML = `
+      <div class="image-picker-backdrop"></div>
+      <div class="image-picker-panel">
+        <div class="image-picker-header">
+          <h3>Build Comparison</h3>
+          <button class="close-btn btn" title="Close">&times;</button>
+        </div>
+        <div class="comparison-builder-body">
+          <input class="before-input form-control" type="text" placeholder="Before Image URL"></input>
+          <button class="select-b-btn btn btn-primary">Select Before Image</button>
+          <input class="after-input form-control" type="text" placeholder="After Image URL"></input>
+          <button class="select-a-btn btn btn-primary">Select After Image</button>
+          <input class="desc-input form-control" type="text" placeholder="Description (optional)"></input>
+          <button class="insert-btn btn btn-primary">Insert Comparison</button>
+        </div>
+      </div>
+    `;
+        document.body.appendChild(modal);
+
+        let before_input = modal.querySelector('.before-input');
+        let after_input = modal.querySelector('.after-input');
+
+        modal.querySelector('.select-b-btn').addEventListener('click', () =>
+            openImagePicker((meta) => {
+                before_input.value = `/uploads/${meta.id}`;
+            }),
+        );
+        modal.querySelector('.select-a-btn').addEventListener('click', () =>
+            openImagePicker((meta) => {
+                after_input.value = `/uploads/${meta.id}`;
+            }),
+        );
+
+        modal
+            .querySelectorAll('.close-btn')
+            .forEach((b) => b.addEventListener('click', () => modal.remove()));
+        modal
+            .querySelector('.image-picker-backdrop')
+            .addEventListener('click', () => modal.remove());
+
+        function submit() {
+            if (before_input.value !== '' && after_input.value !== '') {
+                var desc = modal.querySelector('.desc-input').value;
+                if (desc === undefined) desc = '';
+                modal.remove();
+                onSelect({
+                    url1: before_input.value,
+                    url2: after_input.value,
+                    desc: desc,
+                });
+            }
+        }
+
+        modal
+            .querySelector('.insert-btn')
+            .addEventListener('click', () => submit());
+    }
+
+    window.openComparisonBuilder = openComparisonBuilder;
 
     // Expose globally
     window.openImagePicker = openImagePicker;
@@ -272,11 +335,13 @@ var bindings = {
     redo: redo,
     toggleSideBySide: toggleSideBySide,
     toggleFullScreen: toggleFullScreen,
+    toggleUnderline: toggleUnderline,
 };
 
 var shortcuts = {
     toggleBold: 'Cmd-B',
     toggleItalic: 'Cmd-I',
+    toggleUnderline: 'Cmd-U',
     drawLink: 'Cmd-K',
     toggleHeadingSmaller: 'Cmd-H',
     toggleHeadingBigger: 'Shift-Cmd-H',
@@ -724,12 +789,19 @@ function toggleStrikethrough(editor) {
 }
 
 /**
- * Action for toggling code block.
+ * Action for toggling underline.
  * @param {EasyMDE} editor
  */
-function toggleCodeBlock(editor) {
-    var fenceCharsToInsert = editor.options.blockStyles.code;
+function toggleUnderline(editor) {
+    _toggleBlock(editor, 'underline', '<u>', '</u>');
+}
 
+function toggleFencedBlock(
+    editor,
+    fenceCharsToInsert,
+    allowSingleLine,
+    stringToAdd = '',
+) {
     function fencing_line(line) {
         /* return true, if this is a ``` or ~~~ line */
         if (typeof line !== 'object') {
@@ -741,11 +813,7 @@ function toggleCodeBlock(editor) {
                 line
             );
         }
-        return (
-            line.styles &&
-            line.styles[2] &&
-            line.styles[2].indexOf('formatting-code-block') !== -1
-        );
+        return line.text.trim().startsWith(fenceCharsToInsert);
     }
 
     function token_state(token) {
@@ -801,7 +869,7 @@ function toggleCodeBlock(editor) {
         var start_line_sel = cur_start.line + 1,
             end_line_sel = cur_end.line + 1,
             sel_multi = cur_start.line !== cur_end.line,
-            repl_start = fenceCharsToInsert + '\n',
+            repl_start = fenceCharsToInsert + stringToAdd + '\n',
             repl_end = '\n' + fenceCharsToInsert;
         if (sel_multi) {
             end_line_sel++;
@@ -1083,7 +1151,11 @@ function toggleCodeBlock(editor) {
             cur_start.ch === cur_end.ch &&
             cur_start.ch === 0;
         var sel_multi = cur_start.line !== cur_end.line;
-        if (no_sel_and_starting_of_line || sel_multi) {
+        if (
+            no_sel_and_starting_of_line ||
+            sel_multi ||
+            allowSingleLine === false
+        ) {
             insertFencingAtSelection(
                 cm,
                 cur_start,
@@ -1094,6 +1166,22 @@ function toggleCodeBlock(editor) {
             _replaceSelection(cm, false, ['`', '`']);
         }
     }
+}
+
+/**
+ * Action for toggling code block.
+ * @param {EasyMDE} editor
+ */
+function toggleCodeBlock(editor) {
+    toggleFencedBlock(editor, editor.options.blockStyles.code, true);
+}
+
+function toggleCenterBlock(editor) {
+    toggleFencedBlock(editor, ':::', false, 'center');
+}
+
+function toggleRightBlock(editor) {
+    toggleFencedBlock(editor, ':::', false, 'right');
 }
 
 /**
@@ -1214,6 +1302,32 @@ function drawImage(editor) {
         var url = meta.url;
         _toggleLink(editor, 'image', options.insertTexts.image, url);
     });
+}
+
+function drawComparisonSlider(editor) {
+    window.openComparisonBuilder((meta) => {
+        if (!editor.codemirror || editor.isPreviewActive()) {
+            return;
+        }
+        var text = `:::comparison\n${meta.url1}\n${meta.url2}\n${meta.desc}\n:::`;
+        var cm = editor.codemirror;
+        _replaceSelection(cm, false, [text, '']);
+    });
+}
+
+/**
+ * Action for drawing a YouTube video.
+ * @param {EasyMDE} editor
+ */
+function drawYoutube(editor) {
+    var options = editor.options;
+    var url = '';
+    var result = prompt(options.promptTexts.youtube, url);
+    if (!result) {
+        return false;
+    }
+    url = escapePromptURL(result);
+    _toggleLink(editor, 'image', options.insertTexts.image, url);
 }
 
 /**
@@ -1729,6 +1843,9 @@ function _toggleBlock(editor, type, start_chars, end_chars) {
         } else if (type == 'strikethrough') {
             start = start.replace(/(\*\*|~~)(?![\s\S]*(\*\*|~~))/, '');
             end = end.replace(/(\*\*|~~)/, '');
+        } else if (type == 'underline') {
+            start = start.replace(/(<u>)(?![\s\S]*(<u>))/, '');
+            end = end.replace(/(<\/u>)/, '');
         }
         cm.replaceRange(
             start + end,
@@ -1752,6 +1869,11 @@ function _toggleBlock(editor, type, start_chars, end_chars) {
             if (startPoint !== endPoint) {
                 endPoint.ch -= 1;
             }
+        } else if (type == 'underline') {
+            startPoint.ch -= 3;
+            if (startPoint !== endPoint) {
+                endPoint.ch -= 4;
+            }
         }
     } else {
         text = cm.getSelection();
@@ -1763,6 +1885,8 @@ function _toggleBlock(editor, type, start_chars, end_chars) {
             text = text.split('_').join('');
         } else if (type == 'strikethrough') {
             text = text.split('~~').join('');
+        } else if (type == 'underline') {
+            text = text.split('<u>').join('').split('</u>').join('');
         }
         cm.replaceSelection(start + text + end);
 
@@ -1880,6 +2004,7 @@ var iconClassMap = {
     bold: 'fa fa-bold',
     italic: 'fa fa-italic',
     strikethrough: 'fa fa-strikethrough',
+    underline: 'fa fa-underline',
     heading: 'fa fa-header fa-heading',
     'heading-smaller': 'fa fa-header fa-heading header-smaller',
     'heading-bigger': 'fa fa-header fa-heading header-bigger',
@@ -1902,6 +2027,11 @@ var iconClassMap = {
     guide: 'fa fa-question-circle',
     undo: 'fa fa-undo',
     redo: 'fa fa-repeat fa-redo',
+    youtube: 'fa-brands fa-youtube',
+    left: 'fa fa-align-left',
+    center: 'fa fa-align-center',
+    right: 'fa fa-align-right',
+    comparison: 'fa fa-arrows-left-right',
 };
 
 var toolbarBuiltInButtons = {
@@ -1924,6 +2054,14 @@ var toolbarBuiltInButtons = {
         action: toggleStrikethrough,
         className: iconClassMap['strikethrough'],
         title: 'Strikethrough',
+        default: true,
+    },
+    underline: {
+        name: 'underline',
+        action: toggleUnderline,
+        className: iconClassMap['underline'],
+        title: 'Underline',
+        default: true,
     },
     heading: {
         name: 'heading',
@@ -2015,6 +2153,20 @@ var toolbarBuiltInButtons = {
         title: 'Insert Image',
         default: true,
     },
+    comparison: {
+        name: 'comparison',
+        action: drawComparisonSlider,
+        className: iconClassMap['comparison'],
+        title: 'Insert Image Comparison',
+        default: true,
+    },
+    youtube: {
+        name: 'youtube',
+        action: drawYoutube,
+        className: iconClassMap['youtube'],
+        title: 'YouTube Video',
+        default: true,
+    },
     'upload-image': {
         name: 'upload-image',
         action: drawUploadedImage,
@@ -2035,6 +2187,23 @@ var toolbarBuiltInButtons = {
     },
     'separator-3': {
         name: 'separator-3',
+    },
+    center: {
+        name: 'center',
+        action: toggleCenterBlock,
+        className: iconClassMap['center'],
+        title: 'Align Center',
+        default: true,
+    },
+    right: {
+        name: 'right',
+        action: toggleRightBlock,
+        className: iconClassMap['right'],
+        title: 'Align Right',
+        default: true,
+    },
+    'separator-4': {
+        name: 'separator-4',
     },
     preview: {
         name: 'preview',
@@ -2062,8 +2231,8 @@ var toolbarBuiltInButtons = {
         title: 'Toggle Fullscreen',
         default: true,
     },
-    'separator-4': {
-        name: 'separator-4',
+    'separator-5': {
+        name: 'separator-5',
     },
     guide: {
         name: 'guide',
@@ -2073,8 +2242,8 @@ var toolbarBuiltInButtons = {
         title: 'Markdown Guide',
         default: true,
     },
-    'separator-5': {
-        name: 'separator-5',
+    'separator-6': {
+        name: 'separator-6',
     },
     undo: {
         name: 'undo',
@@ -2107,6 +2276,7 @@ var insertTexts = {
 var promptTexts = {
     link: 'URL for the link:',
     image: 'URL of the image:',
+    youtube: 'YouTube video URL:',
 };
 
 var timeFormat = {
@@ -3382,6 +3552,7 @@ EasyMDE.prototype.createToolbar = function (items) {
             (function (key) {
                 var el = toolbarData[key];
                 if (stat[key]) {
+                    console.log(`${key} is active`);
                     el.classList.add('active');
                 } else if (key != 'fullscreen' && key != 'side-by-side') {
                     el.classList.remove('active');
