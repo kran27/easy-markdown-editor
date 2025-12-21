@@ -1,3 +1,9 @@
+# You probably don't want to use this fork. It's been modified and requires being run from a specific closed source web server I'm working on.
+
+original readme continues below.
+
+---
+
 # EasyMDE - Markdown Editor
 
 [![npm version](https://img.shields.io/npm/v/easymde.svg?style=for-the-badge)](https://www.npmjs.com/package/easymde)

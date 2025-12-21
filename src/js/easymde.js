@@ -14,61 +14,281 @@ require('codemirror/mode/xml/xml.js');
 var CodeMirrorSpellChecker = require('codemirror-spell-checker');
 var marked = require('marked').marked;
 
+var FilePond = require('filepond');
 
 // Some variables
 var isMac = /Mac/.test(navigator.platform);
 var anchorToExternalRegex = new RegExp(/(<a.*?https?:\/\/.*?[^a]>)+?/g);
 
+// just gonna put my new code at the top here
+async function renderMarkdown(markdown, object) {
+    if (markdown.codePointAt(0) === 10) {
+        object.innerHTML = '';
+        return;
+    }
+    try {
+        const res = await fetch('/api/render', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ markdown }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const { html } = await res.json();
+        object.innerHTML = html;
+        window.highlight();
+    } catch (err) {
+        console.error('Render error', err);
+        object.innerHTML = 'Error rendering preview';
+    }
+}
+
+(function () {
+    function formatDate(utc) {
+        return new Date(utc).toLocaleString();
+    }
+
+    async function fetchList() {
+        const res = await fetch('/api/upload/list');
+        if (!res.ok) throw new Error('Failed to load list');
+        return await res.json();
+    }
+
+    async function rename(id, newName) {
+        const res = await fetch('/api/upload/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, niceName: newName }),
+        });
+        if (!res.ok) throw new Error('Rename failed');
+    }
+
+    async function remove(id) {
+        const res = await fetch(
+            `/api/upload/delete/${encodeURIComponent(id)}`,
+            { method: 'DELETE' },
+        );
+        if (!res.ok) throw new Error('Delete failed');
+    }
+
+    function createModal() {
+        const modal = document.createElement('div');
+        modal.className = 'image-picker-modal';
+        modal.innerHTML = `
+      <div class="image-picker-backdrop"></div>
+      <div class="image-picker-panel">
+        <div class="image-picker-header">
+          <h3>Select image</h3>
+          <button class="close-btn btn" title="Close">&times;</button>
+        </div>
+        <div class="image-picker-body">
+          <input type="file" class="filepond" name="file" id="filepond" />
+          <div class="image-grid" role="list"></div>
+        </div>
+      </div>
+    `;
+        document.body.appendChild(modal);
+
+        modal
+            .querySelectorAll('.close-btn')
+            .forEach((b) => b.addEventListener('click', () => modal.remove()));
+        modal
+            .querySelector('.image-picker-backdrop')
+            .addEventListener('click', () => modal.remove());
+
+        const pond = FilePond.create(document.querySelector('input.filepond'), {
+            allowMultiple: true,
+            maxFileSize: '5MB',
+            acceptedFileTypes: ['image/*'],
+
+            server: {
+                process: {
+                    url: '/api/upload/process',
+                    method: 'POST',
+                    onload: (response) => {
+                        return response;
+                    },
+                    onerror: (response) => {
+                        console.error('Upload error', response);
+                    },
+                },
+
+                revert: {
+                    url: '/api/upload/revert',
+                    method: 'POST',
+                },
+            },
+        });
+
+        pond.on('processfile', (error, file) => {
+            if (!error) {
+                console.log('File processed and serverId is', file.serverId);
+                // You can show a link to the uploaded file:
+                const meta = {
+                    url: `/uploads/${encodeURIComponent(file.serverId)}`,
+                    niceName: file.filename,
+                    uploadedUtc: file.file.lastModified,
+                    size: file.fileSize,
+                    id: file.serverId,
+                };
+                window.onSelect(meta);
+                window.modal.remove();
+            }
+        });
+
+        return modal;
+    }
+
+    function makeItem(meta, onSelect, modal) {
+        const item = document.createElement('div');
+        item.className = 'image-item';
+        item.setAttribute('role', 'listitem');
+
+        const img = document.createElement('img');
+        img.src = meta.url + '?width=300&height=150&quality=60';
+        img.alt = meta.niceName || meta.originalFileName;
+        img.loading = 'lazy';
+        img.className = 'image-thumb';
+
+        const title = document.createElement('div');
+        title.className = 'image-title';
+        title.textContent = meta.niceName || meta.originalFileName;
+
+        const metaLine = document.createElement('div');
+        metaLine.className = 'image-meta';
+        metaLine.textContent = `${formatDate(meta.uploadedUtc)} • ${Math.round(meta.size / 1024)} KB`;
+
+        const actions = document.createElement('div');
+        actions.className = 'image-actions';
+        const selectBtn = document.createElement('button');
+        selectBtn.textContent = 'Insert';
+        selectBtn.className = 'select-btn btn btn-primary';
+        selectBtn.addEventListener('click', () => {
+            onSelect(meta);
+            modal.remove();
+        });
+
+        const renameBtn = document.createElement('button');
+        renameBtn.innerHTML = '<i class="fa-solid fa-i-cursor"></i>';
+        renameBtn.className = 'rename-btn btn btn-primary';
+        renameBtn.addEventListener('click', async () => {
+            const newName = prompt(
+                'New display name',
+                meta.niceName || meta.originalFileName,
+            );
+            if (!newName) return;
+            try {
+                await rename(meta.id, newName);
+                title.textContent = newName;
+                meta.niceName = newName;
+            } catch (e) {
+                alert('Rename failed');
+            }
+        });
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.innerHTML = '<i class="fa-solid fa-trash-can"></i>';
+        deleteBtn.className = 'btn btn-danger';
+        deleteBtn.addEventListener('click', async () => {
+            if (!confirm('Delete this image?')) return;
+            try {
+                await remove(meta.id);
+                item.remove();
+            } catch (e) {
+                alert('Delete failed');
+            }
+        });
+
+        actions.appendChild(selectBtn);
+        actions.appendChild(deleteBtn);
+        actions.appendChild(renameBtn);
+
+        item.appendChild(img);
+        item.appendChild(title);
+        item.appendChild(metaLine);
+        item.appendChild(actions);
+
+        return item;
+    }
+
+    async function openImagePicker(onSelect) {
+        const modal = createModal();
+        const grid = modal.querySelector('.image-grid');
+
+        try {
+            const list = await fetchList();
+            if (!Array.isArray(list) || list.length === 0) {
+                grid.innerHTML = '<div class="empty">No images uploaded.</div>';
+                return;
+            }
+
+            // sorted on server; just iterate
+            list.forEach((meta) => {
+                const el = makeItem(meta, onSelect, modal);
+                grid.appendChild(el);
+            });
+        } catch (e) {
+            grid.innerHTML = '<div class="error">Failed to load images.</div>';
+        }
+
+        window.onSelect = onSelect;
+        window.modal = modal;
+    }
+
+    // Expose globally
+    window.openImagePicker = openImagePicker;
+})();
+
 // Mapping of actions that can be bound to keyboard shortcuts or toolbar buttons
 var bindings = {
-    'toggleBold': toggleBold,
-    'toggleItalic': toggleItalic,
-    'drawLink': drawLink,
-    'toggleHeadingSmaller': toggleHeadingSmaller,
-    'toggleHeadingBigger': toggleHeadingBigger,
-    'drawImage': drawImage,
-    'toggleBlockquote': toggleBlockquote,
-    'toggleOrderedList': toggleOrderedList,
-    'toggleUnorderedList': toggleUnorderedList,
-    'toggleCodeBlock': toggleCodeBlock,
-    'togglePreview': togglePreview,
-    'toggleStrikethrough': toggleStrikethrough,
-    'toggleHeading1': toggleHeading1,
-    'toggleHeading2': toggleHeading2,
-    'toggleHeading3': toggleHeading3,
-    'toggleHeading4': toggleHeading4,
-    'toggleHeading5': toggleHeading5,
-    'toggleHeading6': toggleHeading6,
-    'cleanBlock': cleanBlock,
-    'drawTable': drawTable,
-    'drawHorizontalRule': drawHorizontalRule,
-    'undo': undo,
-    'redo': redo,
-    'toggleSideBySide': toggleSideBySide,
-    'toggleFullScreen': toggleFullScreen,
+    toggleBold: toggleBold,
+    toggleItalic: toggleItalic,
+    drawLink: drawLink,
+    toggleHeadingSmaller: toggleHeadingSmaller,
+    toggleHeadingBigger: toggleHeadingBigger,
+    drawImage: drawImage,
+    toggleBlockquote: toggleBlockquote,
+    toggleOrderedList: toggleOrderedList,
+    toggleUnorderedList: toggleUnorderedList,
+    toggleCodeBlock: toggleCodeBlock,
+    togglePreview: togglePreview,
+    toggleStrikethrough: toggleStrikethrough,
+    toggleHeading1: toggleHeading1,
+    toggleHeading2: toggleHeading2,
+    toggleHeading3: toggleHeading3,
+    toggleHeading4: toggleHeading4,
+    toggleHeading5: toggleHeading5,
+    toggleHeading6: toggleHeading6,
+    cleanBlock: cleanBlock,
+    drawTable: drawTable,
+    drawHorizontalRule: drawHorizontalRule,
+    undo: undo,
+    redo: redo,
+    toggleSideBySide: toggleSideBySide,
+    toggleFullScreen: toggleFullScreen,
 };
 
 var shortcuts = {
-    'toggleBold': 'Cmd-B',
-    'toggleItalic': 'Cmd-I',
-    'drawLink': 'Cmd-K',
-    'toggleHeadingSmaller': 'Cmd-H',
-    'toggleHeadingBigger': 'Shift-Cmd-H',
-    'toggleHeading1': 'Ctrl+Alt+1',
-    'toggleHeading2': 'Ctrl+Alt+2',
-    'toggleHeading3': 'Ctrl+Alt+3',
-    'toggleHeading4': 'Ctrl+Alt+4',
-    'toggleHeading5': 'Ctrl+Alt+5',
-    'toggleHeading6': 'Ctrl+Alt+6',
-    'cleanBlock': 'Cmd-E',
-    'drawImage': 'Cmd-Alt-I',
-    'toggleBlockquote': 'Cmd-\'',
-    'toggleOrderedList': 'Cmd-Alt-L',
-    'toggleUnorderedList': 'Cmd-L',
-    'toggleCodeBlock': 'Cmd-Alt-C',
-    'togglePreview': 'Cmd-P',
-    'toggleSideBySide': 'F9',
-    'toggleFullScreen': 'F11',
+    toggleBold: 'Cmd-B',
+    toggleItalic: 'Cmd-I',
+    drawLink: 'Cmd-K',
+    toggleHeadingSmaller: 'Cmd-H',
+    toggleHeadingBigger: 'Shift-Cmd-H',
+    toggleHeading1: 'Ctrl+Alt+1',
+    toggleHeading2: 'Ctrl+Alt+2',
+    toggleHeading3: 'Ctrl+Alt+3',
+    toggleHeading4: 'Ctrl+Alt+4',
+    toggleHeading5: 'Ctrl+Alt+5',
+    toggleHeading6: 'Ctrl+Alt+6',
+    cleanBlock: 'Cmd-E',
+    drawImage: 'Cmd-Alt-I',
+    // prettier-ignore
+    toggleBlockquote: 'Cmd-\'',
+    toggleOrderedList: 'Cmd-Alt-L',
+    toggleUnorderedList: 'Cmd-L',
+    toggleCodeBlock: 'Cmd-Alt-C',
+    togglePreview: 'Cmd-P',
+    toggleSideBySide: 'F9',
+    toggleFullScreen: 'F11',
 };
 
 var getBindingName = function (f) {
@@ -83,7 +303,15 @@ var getBindingName = function (f) {
 var isMobile = function () {
     var check = false;
     (function (a) {
-        if (/(android|bb\d+|meego).+mobile|avantgo|bada\/|blackberry|blazer|compal|elaine|fennec|hiptop|iemobile|ip(hone|od)|iris|kindle|lge |maemo|midp|mmp|mobile.+firefox|netfront|opera m(ob|in)i|palm( os)?|phone|p(ixi|re)\/|plucker|pocket|psp|series(4|6)0|symbian|treo|up\.(browser|link)|vodafone|wap|windows ce|xda|xiino|android|ipad|playbook|silk/i.test(a) || /1207|6310|6590|3gso|4thp|50[1-6]i|770s|802s|a wa|abac|ac(er|oo|s-)|ai(ko|rn)|al(av|ca|co)|amoi|an(ex|ny|yw)|aptu|ar(ch|go)|as(te|us)|attw|au(di|-m|r |s )|avan|be(ck|ll|nq)|bi(lb|rd)|bl(ac|az)|br(e|v)w|bumb|bw-(n|u)|c55\/|capi|ccwa|cdm-|cell|chtm|cldc|cmd-|co(mp|nd)|craw|da(it|ll|ng)|dbte|dc-s|devi|dica|dmob|do(c|p)o|ds(12|-d)|el(49|ai)|em(l2|ul)|er(ic|k0)|esl8|ez([4-7]0|os|wa|ze)|fetc|fly(-|_)|g1 u|g560|gene|gf-5|g-mo|go(\.w|od)|gr(ad|un)|haie|hcit|hd-(m|p|t)|hei-|hi(pt|ta)|hp( i|ip)|hs-c|ht(c(-| |_|a|g|p|s|t)|tp)|hu(aw|tc)|i-(20|go|ma)|i230|iac( |-|\/)|ibro|idea|ig01|ikom|im1k|inno|ipaq|iris|ja(t|v)a|jbro|jemu|jigs|kddi|keji|kgt( |\/)|klon|kpt |kwc-|kyo(c|k)|le(no|xi)|lg( g|\/(k|l|u)|50|54|-[a-w])|libw|lynx|m1-w|m3ga|m50\/|ma(te|ui|xo)|mc(01|21|ca)|m-cr|me(rc|ri)|mi(o8|oa|ts)|mmef|mo(01|02|bi|de|do|t(-| |o|v)|zz)|mt(50|p1|v )|mwbp|mywa|n10[0-2]|n20[2-3]|n30(0|2)|n50(0|2|5)|n7(0(0|1)|10)|ne((c|m)-|on|tf|wf|wg|wt)|nok(6|i)|nzph|o2im|op(ti|wv)|oran|owg1|p800|pan(a|d|t)|pdxg|pg(13|-([1-8]|c))|phil|pire|pl(ay|uc)|pn-2|po(ck|rt|se)|prox|psio|pt-g|qa-a|qc(07|12|21|32|60|-[2-7]|i-)|qtek|r380|r600|raks|rim9|ro(ve|zo)|s55\/|sa(ge|ma|mm|ms|ny|va)|sc(01|h-|oo|p-)|sdk\/|se(c(-|0|1)|47|mc|nd|ri)|sgh-|shar|sie(-|m)|sk-0|sl(45|id)|sm(al|ar|b3|it|t5)|so(ft|ny)|sp(01|h-|v-|v )|sy(01|mb)|t2(18|50)|t6(00|10|18)|ta(gt|lk)|tcl-|tdg-|tel(i|m)|tim-|t-mo|to(pl|sh)|ts(70|m-|m3|m5)|tx-9|up(\.b|g1|si)|utst|v400|v750|veri|vi(rg|te)|vk(40|5[0-3]|-v)|vm40|voda|vulc|vx(52|53|60|61|70|80|81|83|85|98)|w3c(-| )|webc|whit|wi(g |nc|nw)|wmlb|wonu|x700|yas-|your|zeto|zte-/i.test(a.substr(0, 4))) check = true;
+        if (
+            /(android|bb\d+|meego).+mobile|avantgo|bada\/|blackberry|blazer|compal|elaine|fennec|hiptop|iemobile|ip(hone|od)|iris|kindle|lge |maemo|midp|mmp|mobile.+firefox|netfront|opera m(ob|in)i|palm( os)?|phone|p(ixi|re)\/|plucker|pocket|psp|series(4|6)0|symbian|treo|up\.(browser|link)|vodafone|wap|windows ce|xda|xiino|android|ipad|playbook|silk/i.test(
+                a,
+            ) ||
+            /1207|6310|6590|3gso|4thp|50[1-6]i|770s|802s|a wa|abac|ac(er|oo|s-)|ai(ko|rn)|al(av|ca|co)|amoi|an(ex|ny|yw)|aptu|ar(ch|go)|as(te|us)|attw|au(di|-m|r |s )|avan|be(ck|ll|nq)|bi(lb|rd)|bl(ac|az)|br(e|v)w|bumb|bw-(n|u)|c55\/|capi|ccwa|cdm-|cell|chtm|cldc|cmd-|co(mp|nd)|craw|da(it|ll|ng)|dbte|dc-s|devi|dica|dmob|do(c|p)o|ds(12|-d)|el(49|ai)|em(l2|ul)|er(ic|k0)|esl8|ez([4-7]0|os|wa|ze)|fetc|fly(-|_)|g1 u|g560|gene|gf-5|g-mo|go(\.w|od)|gr(ad|un)|haie|hcit|hd-(m|p|t)|hei-|hi(pt|ta)|hp( i|ip)|hs-c|ht(c(-| |_|a|g|p|s|t)|tp)|hu(aw|tc)|i-(20|go|ma)|i230|iac( |-|\/)|ibro|idea|ig01|ikom|im1k|inno|ipaq|iris|ja(t|v)a|jbro|jemu|jigs|kddi|keji|kgt( |\/)|klon|kpt |kwc-|kyo(c|k)|le(no|xi)|lg( g|\/(k|l|u)|50|54|-[a-w])|libw|lynx|m1-w|m3ga|m50\/|ma(te|ui|xo)|mc(01|21|ca)|m-cr|me(rc|ri)|mi(o8|oa|ts)|mmef|mo(01|02|bi|de|do|t(-| |o|v)|zz)|mt(50|p1|v )|mwbp|mywa|n10[0-2]|n20[2-3]|n30(0|2)|n50(0|2|5)|n7(0(0|1)|10)|ne((c|m)-|on|tf|wf|wg|wt)|nok(6|i)|nzph|o2im|op(ti|wv)|oran|owg1|p800|pan(a|d|t)|pdxg|pg(13|-([1-8]|c))|phil|pire|pl(ay|uc)|pn-2|po(ck|rt|se)|prox|psio|pt-g|qa-a|qc(07|12|21|32|60|-[2-7]|i-)|qtek|r380|r600|raks|rim9|ro(ve|zo)|s55\/|sa(ge|ma|mm|ms|ny|va)|sc(01|h-|oo|p-)|sdk\/|se(c(-|0|1)|47|mc|nd|ri)|sgh-|shar|sie(-|m)|sk-0|sl(45|id)|sm(al|ar|b3|it|t5)|so(ft|ny)|sp(01|h-|v-|v )|sy(01|mb)|t2(18|50)|t6(00|10|18)|ta(gt|lk)|tcl-|tdg-|tel(i|m)|tim-|t-mo|to(pl|sh)|ts(70|m-|m3|m5)|tx-9|up(\.b|g1|si)|utst|v400|v750|veri|vi(rg|te)|vk(40|5[0-3]|-v)|vm40|voda|vulc|vx(52|53|60|61|70|80|81|83|85|98)|w3c(-| )|webc|whit|wi(g |nc|nw)|wmlb|wonu|x700|yas-|your|zeto|zte-/i.test(
+                a.substr(0, 4),
+            )
+        )
+            check = true;
     })(navigator.userAgent || navigator.vendor || window.opera);
     return check;
 };
@@ -113,7 +341,6 @@ function addAnchorTargetBlank(htmlText) {
  * @return {string} The modified HTML text.
  */
 function removeListStyleWhenCheckbox(htmlText) {
-
     var parser = new DOMParser();
     var htmlDoc = parser.parseFromString(htmlText, 'text/html');
     var listItems = htmlDoc.getElementsByTagName('li');
@@ -124,7 +351,10 @@ function removeListStyleWhenCheckbox(htmlText) {
         for (var j = 0; j < listItem.children.length; j++) {
             var listItemChild = listItem.children[j];
 
-            if (listItemChild instanceof HTMLInputElement && listItemChild.type === 'checkbox') {
+            if (
+                listItemChild instanceof HTMLInputElement &&
+                listItemChild.type === 'checkbox'
+            ) {
                 // From Github: margin: 0 .2em .25em -1.6em;
                 listItem.style.marginLeft = '-1.5em';
                 listItem.style.listStyleType = 'none';
@@ -151,7 +381,14 @@ function fixShortcut(name) {
  * Create dropdown block
  */
 function createToolbarDropdown(options, enableTooltips, shortcuts, parent) {
-    var el = createToolbarButton(options, false, enableTooltips, shortcuts, 'button', parent);
+    var el = createToolbarButton(
+        options,
+        false,
+        enableTooltips,
+        shortcuts,
+        'button',
+        parent,
+    );
     el.classList.add('easymde-dropdown');
 
     el.onclick = function () {
@@ -160,18 +397,41 @@ function createToolbarDropdown(options, enableTooltips, shortcuts, parent) {
 
     var content = document.createElement('div');
     content.className = 'easymde-dropdown-content';
-    for (var childrenIndex = 0; childrenIndex < options.children.length; childrenIndex++) {
-
+    for (
+        var childrenIndex = 0;
+        childrenIndex < options.children.length;
+        childrenIndex++
+    ) {
         var child = options.children[childrenIndex];
         var childElement;
 
         if (typeof child === 'string' && child in toolbarBuiltInButtons) {
-            childElement = createToolbarButton(toolbarBuiltInButtons[child], true, enableTooltips, shortcuts, 'button', parent);
+            childElement = createToolbarButton(
+                toolbarBuiltInButtons[child],
+                true,
+                enableTooltips,
+                shortcuts,
+                'button',
+                parent,
+            );
         } else {
-            childElement = createToolbarButton(child, true, enableTooltips, shortcuts, 'button', parent);
+            childElement = createToolbarButton(
+                child,
+                true,
+                enableTooltips,
+                shortcuts,
+                'button',
+                parent,
+            );
         }
 
-        childElement.addEventListener('click', function (e) { e.stopPropagation(); }, false);
+        childElement.addEventListener(
+            'click',
+            function (e) {
+                e.stopPropagation();
+            },
+            false,
+        );
         content.appendChild(childElement);
     }
     el.appendChild(content);
@@ -181,23 +441,37 @@ function createToolbarDropdown(options, enableTooltips, shortcuts, parent) {
 /**
  * Create button element for toolbar.
  */
-function createToolbarButton(options, enableActions, enableTooltips, shortcuts, markup, parent) {
+function createToolbarButton(
+    options,
+    enableActions,
+    enableTooltips,
+    shortcuts,
+    markup,
+    parent,
+) {
     options = options || {};
     var el = document.createElement(markup);
 
     // Add 'custom' attributes as early as possible, so that 'official' attributes will never be overwritten.
     if (options.attributes) {
         for (var attribute in options.attributes) {
-            if (Object.prototype.hasOwnProperty.call(options.attributes, attribute)) {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    options.attributes,
+                    attribute,
+                )
+            ) {
                 el.setAttribute(attribute, options.attributes[attribute]);
             }
         }
     }
 
-    var classNamePrefix = parent.options.toolbarButtonClassPrefix ? parent.options.toolbarButtonClassPrefix + '-' : '';
+    var classNamePrefix = parent.options.toolbarButtonClassPrefix
+        ? parent.options.toolbarButtonClassPrefix + '-'
+        : '';
     el.className = classNamePrefix + options.name;
     el.setAttribute('type', markup);
-    enableTooltips = (enableTooltips == undefined) ? true : enableTooltips;
+    enableTooltips = enableTooltips == undefined ? true : enableTooltips;
 
     if (options.text) {
         el.innerText = options.text;
@@ -237,7 +511,11 @@ function createToolbarButton(options, enableActions, enableTooltips, shortcuts, 
 
     // Provide backwards compatibility with simple-markdown-editor by adding custom classes to the button.
     var iconClasses = [];
-    for (var classNameIndex = 0; classNameIndex < classNameParts.length; classNameIndex++) {
+    for (
+        var classNameIndex = 0;
+        classNameIndex < classNameParts.length;
+        classNameIndex++
+    ) {
         var classNamePart = classNameParts[classNameIndex];
         // Split icon classes from the button.
         // Regex will detect "fa", "fas", "fa-something" and "fa-some-icon-1", but not "fanfare".
@@ -253,7 +531,11 @@ function createToolbarButton(options, enableActions, enableTooltips, shortcuts, 
     if (iconClasses.length > 0) {
         // Create icon element and append as a child to the button
         var icon = document.createElement('i');
-        for (var iconClassIndex = 0; iconClassIndex < iconClasses.length; iconClassIndex++) {
+        for (
+            var iconClassIndex = 0;
+            iconClassIndex < iconClasses.length;
+            iconClassIndex++
+        ) {
             var iconClass = iconClasses[iconClassIndex];
             icon.classList.add(iconClass);
         }
@@ -314,7 +596,8 @@ function getState(cm, pos) {
     var types = stat.type.split(' ');
 
     var ret = {},
-        data, text;
+        data,
+        text;
     for (var i = 0; i < types.length; i++) {
         data = types[i];
         if (data === 'strong') {
@@ -347,7 +630,6 @@ function getState(cm, pos) {
     return ret;
 }
 
-
 // Saved overflow setting
 var saved_overflow = '';
 
@@ -359,7 +641,6 @@ function toggleFullScreen(editor) {
     // Set fullscreen
     var cm = editor.codemirror;
     cm.setOption('fullScreen', !cm.getOption('fullScreen'));
-
 
     // Prevent scrolling on body during fullscreen active
     if (cm.getOption('fullScreen')) {
@@ -411,7 +692,6 @@ function toggleFullScreen(editor) {
     }
 }
 
-
 /**
  * Action for toggling bold.
  * @param {EasyMDE} editor
@@ -420,7 +700,6 @@ function toggleBold(editor) {
     _toggleBlock(editor, 'bold', editor.options.blockStyles.bold);
 }
 
-
 /**
  * Action for toggling italic.
  * @param {EasyMDE} editor
@@ -428,7 +707,6 @@ function toggleBold(editor) {
 function toggleItalic(editor) {
     _toggleBlock(editor, 'italic', editor.options.blockStyles.italic);
 }
-
 
 /**
  * Action for toggling strikethrough.
@@ -448,9 +726,19 @@ function toggleCodeBlock(editor) {
     function fencing_line(line) {
         /* return true, if this is a ``` or ~~~ line */
         if (typeof line !== 'object') {
-            throw 'fencing_line() takes a \'line\' object (not a line number, or line text).  Got: ' + typeof line + ': ' + line;
+            throw (
+                // prettier-ignore
+                'fencing_line() takes a \'line\' object (not a line number, or line text).  Got: ' +
+                typeof line +
+                ': ' +
+                line
+            );
         }
-        return line.styles && line.styles[2] && line.styles[2].indexOf('formatting-code-block') !== -1;
+        return (
+            line.styles &&
+            line.styles[2] &&
+            line.styles[2].indexOf('formatting-code-block') !== -1
+        );
     }
 
     function token_state(token) {
@@ -466,14 +754,19 @@ function toggleCodeBlock(editor) {
          *   To check in the middle of a line, pass in firstTok yourself.
          */
         line = line || cm.getLineHandle(line_num);
-        firstTok = firstTok || cm.getTokenAt({
-            line: line_num,
-            ch: 1,
-        });
-        lastTok = lastTok || (!!line.text && cm.getTokenAt({
-            line: line_num,
-            ch: line.text.length - 1,
-        }));
+        firstTok =
+            firstTok ||
+            cm.getTokenAt({
+                line: line_num,
+                ch: 1,
+            });
+        lastTok =
+            lastTok ||
+            (!!line.text &&
+                cm.getTokenAt({
+                    line: line_num,
+                    ch: line.text.length - 1,
+                }));
         var types = firstTok.type ? firstTok.type.split(' ') : [];
         if (lastTok && token_state(lastTok).indentedCode) {
             // have to check last char, since first chars of first line aren"t marked as indented
@@ -481,14 +774,23 @@ function toggleCodeBlock(editor) {
         } else if (types.indexOf('comment') === -1) {
             // has to be after "indented" check, since first chars of first indented line aren"t marked as such
             return false;
-        } else if (token_state(firstTok).fencedChars || token_state(lastTok).fencedChars || fencing_line(line)) {
+        } else if (
+            token_state(firstTok).fencedChars ||
+            token_state(lastTok).fencedChars ||
+            fencing_line(line)
+        ) {
             return 'fenced';
         } else {
             return 'single';
         }
     }
 
-    function insertFencingAtSelection(cm, cur_start, cur_end, fenceCharsToInsert) {
+    function insertFencingAtSelection(
+        cm,
+        cur_start,
+        cur_end,
+        fenceCharsToInsert,
+    ) {
         var start_line_sel = cur_start.line + 1,
             end_line_sel = cur_end.line + 1,
             sel_multi = cur_start.line !== cur_end.line,
@@ -503,13 +805,16 @@ function toggleCodeBlock(editor) {
             end_line_sel--;
         }
         _replaceSelection(cm, false, [repl_start, repl_end]);
-        cm.setSelection({
-            line: start_line_sel,
-            ch: 0,
-        }, {
-            line: end_line_sel,
-            ch: 0,
-        });
+        cm.setSelection(
+            {
+                line: start_line_sel,
+                ch: 0,
+            },
+            {
+                line: end_line_sel,
+                ch: 0,
+            },
+        );
     }
 
     var cm = editor.codemirror,
@@ -527,13 +832,17 @@ function toggleCodeBlock(editor) {
         // similar to some EasyMDE _toggleBlock logic
         var start = line.text.slice(0, cur_start.ch).replace('`', ''),
             end = line.text.slice(cur_start.ch).replace('`', '');
-        cm.replaceRange(start + end, {
-            line: cur_start.line,
-            ch: 0,
-        }, {
-            line: cur_start.line,
-            ch: 99999999999999,
-        });
+        cm.replaceRange(
+            start + end,
+            {
+                line: cur_start.line,
+                ch: 0,
+            },
+            {
+                line: cur_start.line,
+                ch: 99999999999999,
+            },
+        );
         cur_start.ch--;
         if (cur_start !== cur_end) {
             cur_end.ch--;
@@ -545,7 +854,11 @@ function toggleCodeBlock(editor) {
             // use selection
 
             // find the fenced line so we know what type it is (tilde, backticks, number of them)
-            for (block_start = cur_start.line; block_start >= 0; block_start--) {
+            for (
+                block_start = cur_start.line;
+                block_start >= 0;
+                block_start--
+            ) {
                 line = cm.getLineHandle(block_start);
                 if (fencing_line(line)) {
                     break;
@@ -575,7 +888,10 @@ function toggleCodeBlock(editor) {
                 if (cur_end.ch === 0) {
                     end_line += 1;
                 }
-            } else if (cur_end.ch !== 0 && fencing_line(cm.getLineHandle(cur_end.line + 1))) {
+            } else if (
+                cur_end.ch !== 0 &&
+                fencing_line(cm.getLineHandle(cur_end.line + 1))
+            ) {
                 end_text = '';
                 end_line = cur_end.line + 1;
             } else {
@@ -588,33 +904,45 @@ function toggleCodeBlock(editor) {
             }
             cm.operation(function () {
                 // end line first, so that line numbers don't change
-                cm.replaceRange(end_text, {
-                    line: end_line,
-                    ch: 0,
-                }, {
-                    line: end_line + (end_text ? 0 : 1),
-                    ch: 0,
-                });
-                cm.replaceRange(start_text, {
-                    line: start_line,
-                    ch: 0,
-                }, {
-                    line: start_line + (start_text ? 0 : 1),
-                    ch: 0,
-                });
+                cm.replaceRange(
+                    end_text,
+                    {
+                        line: end_line,
+                        ch: 0,
+                    },
+                    {
+                        line: end_line + (end_text ? 0 : 1),
+                        ch: 0,
+                    },
+                );
+                cm.replaceRange(
+                    start_text,
+                    {
+                        line: start_line,
+                        ch: 0,
+                    },
+                    {
+                        line: start_line + (start_text ? 0 : 1),
+                        ch: 0,
+                    },
+                );
             });
-            cm.setSelection({
-                line: start_line + (start_text ? 1 : 0),
-                ch: 0,
-            }, {
-                line: end_line + (start_text ? 1 : -1),
-                ch: 0,
-            });
+            cm.setSelection(
+                {
+                    line: start_line + (start_text ? 1 : 0),
+                    ch: 0,
+                },
+                {
+                    line: end_line + (start_text ? 1 : -1),
+                    ch: 0,
+                },
+            );
             cm.focus();
         } else {
             // no selection, search for ends of this fenced block
             var search_from = cur_start.line;
-            if (fencing_line(cm.getLineHandle(cur_start.line))) { // gets a little tricky if cursor is right on a fenced line
+            if (fencing_line(cm.getLineHandle(cur_start.line))) {
+                // gets a little tricky if cursor is right on a fenced line
                 if (code_type(cm, cur_start.line + 1) === 'fenced') {
                     block_start = cur_start.line;
                     search_from = cur_start.line + 1; // for searching for "end"
@@ -624,7 +952,11 @@ function toggleCodeBlock(editor) {
                 }
             }
             if (block_start === undefined) {
-                for (block_start = search_from; block_start >= 0; block_start--) {
+                for (
+                    block_start = search_from;
+                    block_start >= 0;
+                    block_start--
+                ) {
                     line = cm.getLineHandle(block_start);
                     if (fencing_line(line)) {
                         break;
@@ -633,7 +965,11 @@ function toggleCodeBlock(editor) {
             }
             if (block_end === undefined) {
                 lineCount = cm.lineCount();
-                for (block_end = search_from; block_end < lineCount; block_end++) {
+                for (
+                    block_end = search_from;
+                    block_end < lineCount;
+                    block_end++
+                ) {
                     line = cm.getLineHandle(block_end);
                     if (fencing_line(line)) {
                         break;
@@ -641,20 +977,28 @@ function toggleCodeBlock(editor) {
                 }
             }
             cm.operation(function () {
-                cm.replaceRange('', {
-                    line: block_start,
-                    ch: 0,
-                }, {
-                    line: block_start + 1,
-                    ch: 0,
-                });
-                cm.replaceRange('', {
-                    line: block_end - 1,
-                    ch: 0,
-                }, {
-                    line: block_end,
-                    ch: 0,
-                });
+                cm.replaceRange(
+                    '',
+                    {
+                        line: block_start,
+                        ch: 0,
+                    },
+                    {
+                        line: block_start + 1,
+                        ch: 0,
+                    },
+                );
+                cm.replaceRange(
+                    '',
+                    {
+                        line: block_end - 1,
+                        ch: 0,
+                    },
+                    {
+                        line: block_end,
+                        ch: 0,
+                    },
+                );
             });
             cm.focus();
         }
@@ -668,7 +1012,11 @@ function toggleCodeBlock(editor) {
             }
         } else {
             // no selection, search for ends of this indented block
-            for (block_start = cur_start.line; block_start >= 0; block_start--) {
+            for (
+                block_start = cur_start.line;
+                block_start >= 0;
+                block_start--
+            ) {
                 line = cm.getLineHandle(block_start);
                 if (line.text.match(/^\s*$/)) {
                     // empty or all whitespace - keep going
@@ -681,7 +1029,11 @@ function toggleCodeBlock(editor) {
                 }
             }
             lineCount = cm.lineCount();
-            for (block_end = cur_start.line; block_end < lineCount; block_end++) {
+            for (
+                block_end = cur_start.line;
+                block_end < lineCount;
+                block_end++
+            ) {
                 line = cm.getLineHandle(block_end);
                 if (line.text.match(/^\s*$/)) {
                     // empty or all whitespace - keep going
@@ -697,11 +1049,15 @@ function toggleCodeBlock(editor) {
         // if we are going to un-indent based on a selected set of lines, and the next line is indented too, we need to
         // insert a blank line so that the next line(s) continue to be indented code
         var next_line = cm.getLineHandle(block_end + 1),
-            next_line_last_tok = next_line && cm.getTokenAt({
-                line: block_end + 1,
-                ch: next_line.text.length - 1,
-            }),
-            next_line_indented = next_line_last_tok && token_state(next_line_last_tok).indentedCode;
+            next_line_last_tok =
+                next_line &&
+                cm.getTokenAt({
+                    line: block_end + 1,
+                    ch: next_line.text.length - 1,
+                }),
+            next_line_indented =
+                next_line_last_tok &&
+                token_state(next_line_last_tok).indentedCode;
         if (next_line_indented) {
             cm.replaceRange('\n', {
                 line: block_end + 1,
@@ -715,10 +1071,18 @@ function toggleCodeBlock(editor) {
         cm.focus();
     } else {
         // insert code formatting
-        var no_sel_and_starting_of_line = (cur_start.line === cur_end.line && cur_start.ch === cur_end.ch && cur_start.ch === 0);
+        var no_sel_and_starting_of_line =
+            cur_start.line === cur_end.line &&
+            cur_start.ch === cur_end.ch &&
+            cur_start.ch === 0;
         var sel_multi = cur_start.line !== cur_end.line;
         if (no_sel_and_starting_of_line || sel_multi) {
-            insertFencingAtSelection(cm, cur_start, cur_end, fenceCharsToInsert);
+            insertFencingAtSelection(
+                cm,
+                cur_start,
+                cur_end,
+                fenceCharsToInsert,
+            );
         } else {
             _replaceSelection(cm, false, ['`', '`']);
         }
@@ -788,7 +1152,6 @@ function toggleHeading6(editor) {
     _toggleHeading(editor.codemirror, undefined, 6);
 }
 
-
 /**
  * Action for toggling ul.
  */
@@ -802,7 +1165,6 @@ function toggleUnorderedList(editor) {
 
     _toggleLine(cm, 'unordered-list', listStyle);
 }
-
 
 /**
  * Action for toggling ol.
@@ -840,16 +1202,11 @@ function drawLink(editor) {
  * @param {EasyMDE} editor
  */
 function drawImage(editor) {
-    var options = editor.options;
-    var url = 'https://';
-    if (options.promptURLs) {
-        var result = prompt(options.promptTexts.image, url);
-        if (!result) {
-            return false;
-        }
-        url = escapePromptURL(result);
-    }
-    _toggleLink(editor, 'image', options.insertTexts.image, url);
+    window.openImagePicker((meta) => {
+        var options = editor.options;
+        var url = meta.url;
+        _toggleLink(editor, 'image', options.insertTexts.image, url);
+    });
 }
 
 /**
@@ -879,11 +1236,23 @@ function afterImageUploaded(editor, url) {
     var stat = getState(cm);
     var options = editor.options;
     var imageName = url.substr(url.lastIndexOf('/') + 1);
-    var ext = imageName.substring(imageName.lastIndexOf('.') + 1).replace(/\?.*$/, '').toLowerCase();
+    var ext = imageName
+        .substring(imageName.lastIndexOf('.') + 1)
+        .replace(/\?.*$/, '')
+        .toLowerCase();
 
     // Check if media is an image
-    if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'apng', 'avif', 'webp'].includes(ext)) {
-        _replaceSelection(cm, stat.image, options.insertTexts.uploadedImage, url);
+    if (
+        ['png', 'jpg', 'jpeg', 'gif', 'svg', 'apng', 'avif', 'webp'].includes(
+            ext,
+        )
+    ) {
+        _replaceSelection(
+            cm,
+            stat.image,
+            options.insertTexts.uploadedImage,
+            url,
+        );
     } else {
         var text_link = options.insertTexts.link;
         text_link[0] = '[' + imageName;
@@ -891,9 +1260,18 @@ function afterImageUploaded(editor, url) {
     }
 
     // show uploaded image filename for 1000ms
-    editor.updateStatusBar('upload-image', editor.options.imageTexts.sbOnUploaded.replace('#image_name#', imageName));
+    editor.updateStatusBar(
+        'upload-image',
+        editor.options.imageTexts.sbOnUploaded.replace(
+            '#image_name#',
+            imageName,
+        ),
+    );
     setTimeout(function () {
-        editor.updateStatusBar('upload-image', editor.options.imageTexts.sbInit);
+        editor.updateStatusBar(
+            'upload-image',
+            editor.options.imageTexts.sbInit,
+        );
     }, 1000);
 }
 
@@ -919,7 +1297,6 @@ function drawHorizontalRule(editor) {
     _replaceSelection(cm, stat.image, options.insertTexts.horizontalRule);
 }
 
-
 /**
  * Undo action.
  * @param {EasyMDE} editor
@@ -929,7 +1306,6 @@ function undo(editor) {
     cm.undo();
     cm.focus();
 }
-
 
 /**
  * Redo action.
@@ -941,7 +1317,6 @@ function redo(editor) {
     cm.focus();
 }
 
-
 /**
  * Toggle side by side preview
  * @param {EasyMDE} editor
@@ -950,7 +1325,8 @@ function toggleSideBySide(editor) {
     var cm = editor.codemirror;
     var wrapper = cm.getWrapperElement();
     var preview = wrapper.nextSibling;
-    var toolbarButton = editor.toolbarElements && editor.toolbarElements['side-by-side'];
+    var toolbarButton =
+        editor.toolbarElements && editor.toolbarElements['side-by-side'];
     var useSideBySideListener = false;
 
     var easyMDEContainer = wrapper.parentNode;
@@ -994,10 +1370,7 @@ function toggleSideBySide(editor) {
     }
 
     var sideBySideRenderingFunction = function () {
-        var newValue = editor.options.previewRender(editor.value(), preview);
-        if (newValue != null) {
-            preview.innerHTML = newValue;
-        }
+        renderMarkdown(editor.value(), preview);
     };
 
     if (!cm.sideBySideRenderingFunction) {
@@ -1005,10 +1378,7 @@ function toggleSideBySide(editor) {
     }
 
     if (useSideBySideListener) {
-        var newValue = editor.options.previewRender(editor.value(), preview);
-        if (newValue != null) {
-            preview.innerHTML = newValue;
-        }
+        renderMarkdown(editor.value(), preview);
         cm.on('update', cm.sideBySideRenderingFunction);
     } else {
         cm.off('update', cm.sideBySideRenderingFunction);
@@ -1018,7 +1388,6 @@ function toggleSideBySide(editor) {
     cm.refresh();
 }
 
-
 /**
  * Preview action.
  * @param {EasyMDE} editor
@@ -1027,7 +1396,9 @@ function togglePreview(editor) {
     var cm = editor.codemirror;
     var wrapper = cm.getWrapperElement();
     var toolbar_div = editor.toolbar_div;
-    var toolbar = editor.options.toolbar ? editor.toolbarElements.preview : false;
+    var toolbar = editor.options.toolbar
+        ? editor.toolbarElements.preview
+        : false;
     var preview = wrapper.lastChild;
 
     // Turn off side by side if needed
@@ -1036,17 +1407,14 @@ function togglePreview(editor) {
         toggleSideBySide(editor);
 
     if (!preview || !preview.classList.contains('editor-preview-full')) {
-
         preview = document.createElement('div');
         preview.className = 'editor-preview-full';
 
         if (editor.options.previewClass) {
-
             if (Array.isArray(editor.options.previewClass)) {
                 for (var i = 0; i < editor.options.previewClass.length; i++) {
                     preview.classList.add(editor.options.previewClass[i]);
                 }
-
             } else if (typeof editor.options.previewClass === 'string') {
                 preview.classList.add(editor.options.previewClass);
             }
@@ -1074,15 +1442,15 @@ function togglePreview(editor) {
         }
     }
 
-    var preview_result = editor.options.previewRender(editor.value(), preview);
-    if (preview_result !== null) {
-        preview.innerHTML = preview_result;
-    }
-
+    renderMarkdown(editor.value(), preview);
 }
 
 function _replaceSelection(cm, active, startEnd, url) {
-    if (cm.getWrapperElement().lastChild.classList.contains('editor-preview-active'))
+    if (
+        cm
+            .getWrapperElement()
+            .lastChild.classList.contains('editor-preview-active')
+    )
         return;
 
     var text;
@@ -1093,7 +1461,7 @@ function _replaceSelection(cm, active, startEnd, url) {
     Object.assign(startPoint, cm.getCursor('start'));
     Object.assign(endPoint, cm.getCursor('end'));
     if (url) {
-        start = start.replace('#url#', url);  // url is in start for upload-image
+        start = start.replace('#url#', url); // url is in start for upload-image
         end = end.replace('#url#', url);
     }
     if (active) {
@@ -1117,9 +1485,12 @@ function _replaceSelection(cm, active, startEnd, url) {
     cm.focus();
 }
 
-
 function _toggleHeading(cm, direction, size) {
-    if (cm.getWrapperElement().lastChild.classList.contains('editor-preview-active'))
+    if (
+        cm
+            .getWrapperElement()
+            .lastChild.classList.contains('editor-preview-active')
+    )
         return;
 
     var startPoint = cm.getCursor('start');
@@ -1153,25 +1524,35 @@ function _toggleHeading(cm, direction, size) {
                 } else if (currHeadingLevel == size) {
                     text = text.substr(currHeadingLevel + 1);
                 } else {
-                    text = '#'.repeat(size) + ' ' + text.substr(currHeadingLevel + 1);
+                    text =
+                        '#'.repeat(size) +
+                        ' ' +
+                        text.substr(currHeadingLevel + 1);
                 }
             }
 
-            cm.replaceRange(text, {
-                line: i,
-                ch: 0,
-            }, {
-                line: i,
-                ch: 99999999999999,
-            });
+            cm.replaceRange(
+                text,
+                {
+                    line: i,
+                    ch: 0,
+                },
+                {
+                    line: i,
+                    ch: 99999999999999,
+                },
+            );
         })(i);
     }
     cm.focus();
 }
 
-
 function _toggleLine(cm, name, liststyle) {
-    if (cm.getWrapperElement().lastChild.classList.contains('editor-preview-active'))
+    if (
+        cm
+            .getWrapperElement()
+            .lastChild.classList.contains('editor-preview-active')
+    )
         return;
 
     var listRegexp = /^(\s*)(\*|-|\+|\d*\.)(\s+)/;
@@ -1181,14 +1562,14 @@ function _toggleLine(cm, name, liststyle) {
     var startPoint = cm.getCursor('start');
     var endPoint = cm.getCursor('end');
     var repl = {
-        'quote': /^(\s*)>\s+/,
+        quote: /^(\s*)>\s+/,
         'unordered-list': listRegexp,
         'ordered-list': listRegexp,
     };
 
     var _getChar = function (name, i) {
         var map = {
-            'quote': '>',
+            quote: '>',
             'unordered-list': liststyle,
             'ordered-list': '%%i.',
         };
@@ -1198,7 +1579,7 @@ function _toggleLine(cm, name, liststyle) {
 
     var _checkChar = function (name, char) {
         var map = {
-            'quote': '>',
+            quote: '>',
             'unordered-list': '\\' + liststyle,
             'ordered-list': '\\d+.',
         };
@@ -1214,7 +1595,11 @@ function _toggleLine(cm, name, liststyle) {
             if (_checkChar(name, arr[2])) {
                 char = '';
             }
-            text = arr[1] + char + arr[3] + text.replace(whitespacesRegexp, '').replace(repl[name], '$1');
+            text =
+                arr[1] +
+                char +
+                arr[3] +
+                text.replace(whitespacesRegexp, '').replace(repl[name], '$1');
         } else if (untoggleOnly == false) {
             text = char + ' ' + text;
         }
@@ -1237,13 +1622,17 @@ function _toggleLine(cm, name, liststyle) {
                 text = _toggle(name, text, false);
                 line += 1;
             }
-            cm.replaceRange(text, {
-                line: i,
-                ch: 0,
-            }, {
-                line: i,
-                ch: 99999999999999,
-            });
+            cm.replaceRange(
+                text,
+                {
+                    line: i,
+                    ch: 0,
+                },
+                {
+                    line: i,
+                    ch: 99999999999999,
+                },
+            );
         })(i);
     }
     cm.focus();
@@ -1281,13 +1670,17 @@ function _toggleLink(editor, type, startEnd, url) {
     }
     end = end.replace(/]\(.*?\)/, '');
 
-    cm.replaceRange(start + end, {
-        line: startPoint.line,
-        ch: 0,
-    }, {
-        line: startPoint.line,
-        ch: 99999999999999,
-    });
+    cm.replaceRange(
+        start + end,
+        {
+            line: startPoint.line,
+            ch: 0,
+        },
+        {
+            line: startPoint.line,
+            ch: 99999999999999,
+        },
+    );
 
     startPoint.ch -= startEnd[0].length;
     if (startPoint !== endPoint) {
@@ -1305,7 +1698,7 @@ function _toggleBlock(editor, type, start_chars, end_chars) {
         return;
     }
 
-    end_chars = (typeof end_chars === 'undefined') ? start_chars : end_chars;
+    end_chars = typeof end_chars === 'undefined' ? start_chars : end_chars;
     var cm = editor.codemirror;
     var stat = getState(cm);
 
@@ -1330,13 +1723,17 @@ function _toggleBlock(editor, type, start_chars, end_chars) {
             start = start.replace(/(\*\*|~~)(?![\s\S]*(\*\*|~~))/, '');
             end = end.replace(/(\*\*|~~)/, '');
         }
-        cm.replaceRange(start + end, {
-            line: startPoint.line,
-            ch: 0,
-        }, {
-            line: startPoint.line,
-            ch: 99999999999999,
-        });
+        cm.replaceRange(
+            start + end,
+            {
+                line: startPoint.line,
+                ch: 0,
+            },
+            {
+                line: startPoint.line,
+                ch: 99999999999999,
+            },
+        );
 
         if (type == 'bold' || type == 'strikethrough') {
             startPoint.ch -= 2;
@@ -1371,7 +1768,11 @@ function _toggleBlock(editor, type, start_chars, end_chars) {
 }
 
 function _cleanBlock(cm) {
-    if (cm.getWrapperElement().lastChild.classList.contains('editor-preview-active'))
+    if (
+        cm
+            .getWrapperElement()
+            .lastChild.classList.contains('editor-preview-active')
+    )
         return;
 
     var startPoint = cm.getCursor('start');
@@ -1382,13 +1783,17 @@ function _cleanBlock(cm) {
         text = cm.getLine(line);
         text = text.replace(/^[ ]*([# ]+|\*|-|[> ]+|[0-9]+(.|\)))[ ]*/, '');
 
-        cm.replaceRange(text, {
-            line: line,
-            ch: 0,
-        }, {
-            line: line,
-            ch: 99999999999999,
-        });
+        cm.replaceRange(
+            text,
+            {
+                line: line,
+                ch: 0,
+            },
+            {
+                line: line,
+                ch: 99999999999999,
+            },
+        );
     }
 }
 
@@ -1417,13 +1822,18 @@ function _mergeProperties(target, source) {
     for (var property in source) {
         if (Object.prototype.hasOwnProperty.call(source, property)) {
             if (source[property] instanceof Array) {
-                target[property] = source[property].concat(target[property] instanceof Array ? target[property] : []);
+                target[property] = source[property].concat(
+                    target[property] instanceof Array ? target[property] : [],
+                );
             } else if (
                 source[property] !== null &&
                 typeof source[property] === 'object' &&
                 source[property].constructor === Object
             ) {
-                target[property] = _mergeProperties(target[property] || {}, source[property]);
+                target[property] = _mergeProperties(
+                    target[property] || {},
+                    source[property],
+                );
             } else {
                 target[property] = source[property];
             }
@@ -1444,12 +1854,13 @@ function extend(target) {
 
 /* The right word count in respect for CJK. */
 function wordCount(data) {
-    var pattern = /[a-zA-Z0-9_\u00A0-\u02AF\u0392-\u03c9\u0410-\u04F9]+|[\u4E00-\u9FFF\u3400-\u4dbf\uf900-\ufaff\u3040-\u309f\uac00-\ud7af]+/g;
+    var pattern =
+        /[a-zA-Z0-9_\u00A0-\u02AF\u0392-\u03c9\u0410-\u04F9]+|[\u4E00-\u9FFF\u3400-\u4dbf\uf900-\ufaff\u3040-\u309f\uac00-\ud7af]+/g;
     var m = data.match(pattern);
     var count = 0;
     if (m === null) return count;
     for (var i = 0; i < m.length; i++) {
-        if (m[i].charCodeAt(0) >= 0x4E00) {
+        if (m[i].charCodeAt(0) >= 0x4e00) {
             count += m[i].length;
         } else {
             count += 1;
@@ -1459,55 +1870,55 @@ function wordCount(data) {
 }
 
 var iconClassMap = {
-    'bold': 'fa fa-bold',
-    'italic': 'fa fa-italic',
-    'strikethrough': 'fa fa-strikethrough',
-    'heading': 'fa fa-header fa-heading',
+    bold: 'fa fa-bold',
+    italic: 'fa fa-italic',
+    strikethrough: 'fa fa-strikethrough',
+    heading: 'fa fa-header fa-heading',
     'heading-smaller': 'fa fa-header fa-heading header-smaller',
     'heading-bigger': 'fa fa-header fa-heading header-bigger',
     'heading-1': 'fa fa-header fa-heading header-1',
     'heading-2': 'fa fa-header fa-heading header-2',
     'heading-3': 'fa fa-header fa-heading header-3',
-    'code': 'fa fa-code',
-    'quote': 'fa fa-quote-left',
+    code: 'fa fa-code',
+    quote: 'fa fa-quote-left',
     'ordered-list': 'fa fa-list-ol',
     'unordered-list': 'fa fa-list-ul',
     'clean-block': 'fa fa-eraser',
-    'link': 'fa fa-link',
-    'image': 'fa fa-image',
+    link: 'fa fa-link',
+    image: 'fa fa-image',
     'upload-image': 'fa fa-image',
-    'table': 'fa fa-table',
+    table: 'fa fa-table',
     'horizontal-rule': 'fa fa-minus',
-    'preview': 'fa fa-eye',
+    preview: 'fa fa-eye',
     'side-by-side': 'fa fa-columns',
-    'fullscreen': 'fa fa-arrows-alt',
-    'guide': 'fa fa-question-circle',
-    'undo': 'fa fa-undo',
-    'redo': 'fa fa-repeat fa-redo',
+    fullscreen: 'fa fa-arrows-alt',
+    guide: 'fa fa-question-circle',
+    undo: 'fa fa-undo',
+    redo: 'fa fa-repeat fa-redo',
 };
 
 var toolbarBuiltInButtons = {
-    'bold': {
+    bold: {
         name: 'bold',
         action: toggleBold,
         className: iconClassMap['bold'],
         title: 'Bold',
         default: true,
     },
-    'italic': {
+    italic: {
         name: 'italic',
         action: toggleItalic,
         className: iconClassMap['italic'],
         title: 'Italic',
         default: true,
     },
-    'strikethrough': {
+    strikethrough: {
         name: 'strikethrough',
         action: toggleStrikethrough,
         className: iconClassMap['strikethrough'],
         title: 'Strikethrough',
     },
-    'heading': {
+    heading: {
         name: 'heading',
         action: toggleHeadingSmaller,
         className: iconClassMap['heading'],
@@ -1547,13 +1958,13 @@ var toolbarBuiltInButtons = {
     'separator-1': {
         name: 'separator-1',
     },
-    'code': {
+    code: {
         name: 'code',
         action: toggleCodeBlock,
         className: iconClassMap['code'],
         title: 'Code',
     },
-    'quote': {
+    quote: {
         name: 'quote',
         action: toggleBlockquote,
         className: iconClassMap['quote'],
@@ -1583,14 +1994,14 @@ var toolbarBuiltInButtons = {
     'separator-2': {
         name: 'separator-2',
     },
-    'link': {
+    link: {
         name: 'link',
         action: drawLink,
         className: iconClassMap['link'],
         title: 'Create Link',
         default: true,
     },
-    'image': {
+    image: {
         name: 'image',
         action: drawImage,
         className: iconClassMap['image'],
@@ -1603,7 +2014,7 @@ var toolbarBuiltInButtons = {
         className: iconClassMap['upload-image'],
         title: 'Import an image',
     },
-    'table': {
+    table: {
         name: 'table',
         action: drawTable,
         className: iconClassMap['table'],
@@ -1618,7 +2029,7 @@ var toolbarBuiltInButtons = {
     'separator-3': {
         name: 'separator-3',
     },
-    'preview': {
+    preview: {
         name: 'preview',
         action: togglePreview,
         className: iconClassMap['preview'],
@@ -1635,7 +2046,7 @@ var toolbarBuiltInButtons = {
         title: 'Toggle Side by Side',
         default: true,
     },
-    'fullscreen': {
+    fullscreen: {
         name: 'fullscreen',
         action: toggleFullScreen,
         className: iconClassMap['fullscreen'],
@@ -1647,7 +2058,7 @@ var toolbarBuiltInButtons = {
     'separator-4': {
         name: 'separator-4',
     },
-    'guide': {
+    guide: {
         name: 'guide',
         action: 'https://www.markdownguide.org/basic-syntax/',
         className: iconClassMap['guide'],
@@ -1658,14 +2069,14 @@ var toolbarBuiltInButtons = {
     'separator-5': {
         name: 'separator-5',
     },
-    'undo': {
+    undo: {
         name: 'undo',
         action: undo,
         className: iconClassMap['undo'],
         noDisable: true,
         title: 'Undo',
     },
-    'redo': {
+    redo: {
         name: 'redo',
         action: redo,
         className: iconClassMap['redo'],
@@ -1679,7 +2090,10 @@ var insertTexts = {
     image: ['![', '](#url#)'],
     uploadedImage: ['![](#url#)', ''],
     // uploadedImage: ['![](#url#)\n', ''], // TODO: New line insertion doesn't work here.
-    table: ['', '\n\n| Column 1 | Column 2 | Column 3 |\n| -------- | -------- | -------- |\n| Text     | Text     | Text     |\n\n'],
+    table: [
+        '',
+        '\n\n| Column 1 | Column 2 | Column 3 |\n| -------- | -------- | -------- |\n| Text     | Text     | Text     |\n\n',
+    ],
     horizontalRule: ['', '\n\n-----\n\n'],
 };
 
@@ -1697,9 +2111,9 @@ var timeFormat = {
 };
 
 var blockStyles = {
-    'bold': '**',
-    'code': '```',
-    'italic': '*',
+    bold: '**',
+    code: '```',
+    italic: '*',
 };
 
 /**
@@ -1722,7 +2136,8 @@ var imageTexts = {
 var errorMessages = {
     noFileGiven: 'You must select a file.',
     typeNotAllowed: 'This image type is not allowed.',
-    fileTooLarge: 'Image #image_name# is too big (#image_size#).\n' +
+    fileTooLarge:
+        'Image #image_name# is too big (#image_size#).\n' +
         'Maximum file size is #image_max_size#.',
     importError: 'Something went wrong when uploading the image #image_name#.',
 };
@@ -1747,10 +2162,13 @@ function EasyMDE(options) {
     if (options.autoDownloadFontAwesome !== true) {
         var styleSheets = document.styleSheets;
         for (var i = 0; i < styleSheets.length; i++) {
-            if (!styleSheets[i].href)
-                continue;
+            if (!styleSheets[i].href) continue;
 
-            if (styleSheets[i].href.indexOf('//maxcdn.bootstrapcdn.com/font-awesome/') > -1) {
+            if (
+                styleSheets[i].href.indexOf(
+                    '//maxcdn.bootstrapcdn.com/font-awesome/',
+                ) > -1
+            ) {
                 autoDownloadFA = false;
             }
         }
@@ -1759,10 +2177,10 @@ function EasyMDE(options) {
     if (autoDownloadFA) {
         var link = document.createElement('link');
         link.rel = 'stylesheet';
-        link.href = 'https://maxcdn.bootstrapcdn.com/font-awesome/latest/css/font-awesome.min.css';
+        link.href =
+            'https://maxcdn.bootstrapcdn.com/font-awesome/latest/css/font-awesome.min.css';
         document.getElementsByTagName('head')[0].appendChild(link);
     }
-
 
     // Find the textarea to use
     if (options.element) {
@@ -1773,21 +2191,26 @@ function EasyMDE(options) {
         return;
     }
 
-
     // Handle toolbar
     if (options.toolbar === undefined) {
         // Initialize
         options.toolbar = [];
 
-
         // Loop over the built in buttons, to get the preferred order
         for (var key in toolbarBuiltInButtons) {
-            if (Object.prototype.hasOwnProperty.call(toolbarBuiltInButtons, key)) {
+            if (
+                Object.prototype.hasOwnProperty.call(toolbarBuiltInButtons, key)
+            ) {
                 if (key.indexOf('separator-') != -1) {
                     options.toolbar.push('|');
                 }
 
-                if (toolbarBuiltInButtons[key].default === true || (options.showIcons && options.showIcons.constructor === Array && options.showIcons.indexOf(key) != -1)) {
+                if (
+                    toolbarBuiltInButtons[key].default === true ||
+                    (options.showIcons &&
+                        options.showIcons.constructor === Array &&
+                        options.showIcons.indexOf(key) != -1)
+                ) {
                     options.toolbar.push(key);
                 }
             }
@@ -1808,7 +2231,6 @@ function EasyMDE(options) {
         }
     }
 
-
     // Add default preview rendering function
     if (!options.previewRender) {
         options.previewRender = function (plainText) {
@@ -1817,28 +2239,30 @@ function EasyMDE(options) {
         };
     }
 
-
     // Set default options for parsing config
-    options.parsingConfig = extend({
-        highlightFormatting: true, // needed for toggleCodeBlock to detect types of code
-    }, options.parsingConfig || {});
-
+    options.parsingConfig = extend(
+        {
+            highlightFormatting: true, // needed for toggleCodeBlock to detect types of code
+        },
+        options.parsingConfig || {},
+    );
 
     // Merging the insertTexts, with the given options
     options.insertTexts = extend({}, insertTexts, options.insertTexts || {});
 
-
     // Merging the promptTexts, with the given options
     options.promptTexts = extend({}, promptTexts, options.promptTexts || {});
-
 
     // Merging the blockStyles, with the given options
     options.blockStyles = extend({}, blockStyles, options.blockStyles || {});
 
-
     if (options.autosave != undefined) {
         // Merging the Autosave timeFormat, with the given options
-        options.autosave.timeFormat = extend({}, timeFormat, options.autosave.timeFormat || {});
+        options.autosave.timeFormat = extend(
+            {},
+            timeFormat,
+            options.autosave.timeFormat || {},
+        );
     }
 
     options.iconClassMap = extend({}, iconClassMap, options.iconClassMap || {});
@@ -1857,24 +2281,34 @@ function EasyMDE(options) {
         options.minHeight = options.minHeight || '300px';
     }
 
-    options.errorCallback = options.errorCallback || function (errorMessage) {
-        alert(errorMessage);
-    };
+    options.errorCallback =
+        options.errorCallback ||
+        function (errorMessage) {
+            alert(errorMessage);
+        };
 
     // Import-image default configuration
     options.uploadImage = options.uploadImage || false;
     options.imageMaxSize = options.imageMaxSize || 2097152; // 1024 * 1024 * 2
-    options.imageAccept = options.imageAccept || 'image/png, image/jpeg, image/gif, image/avif';
+    options.imageAccept =
+        options.imageAccept || 'image/png, image/jpeg, image/gif, image/avif';
     options.imageTexts = extend({}, imageTexts, options.imageTexts || {});
-    options.errorMessages = extend({}, errorMessages, options.errorMessages || {});
+    options.errorMessages = extend(
+        {},
+        errorMessages,
+        options.errorMessages || {},
+    );
     options.imagePathAbsolute = options.imagePathAbsolute || false;
     options.imageCSRFName = options.imageCSRFName || 'csrfmiddlewaretoken';
     options.imageCSRFHeader = options.imageCSRFHeader || false;
     options.imageInputName = options.imageInputName || 'image';
 
-
     // Change unique_id to uniqueId for backwards compatibility
-    if (options.autosave != undefined && options.autosave.unique_id != undefined && options.autosave.unique_id != '')
+    if (
+        options.autosave != undefined &&
+        options.autosave.unique_id != undefined &&
+        options.autosave.unique_id != ''
+    )
         options.autosave.uniqueId = options.autosave.unique_id;
 
     // If overlay mode is specified and combine is not provided, default it to true
@@ -1885,15 +2319,17 @@ function EasyMDE(options) {
     // Update this options
     this.options = options;
 
-
     // Auto render
     this.render();
-
 
     // The codemirror component is only available after rendering
     // so, the setter for the initialValue can only run after
     // the element has been rendered
-    if (options.initialValue && (!this.options.autosave || this.options.autosave.foundSavedValue !== true)) {
+    if (
+        options.initialValue &&
+        (!this.options.autosave ||
+            this.options.autosave.foundSavedValue !== true)
+    ) {
         this.value(options.initialValue);
     }
 
@@ -1901,23 +2337,35 @@ function EasyMDE(options) {
         var self = this;
 
         this.codemirror.on('dragenter', function (cm, event) {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbOnDragEnter);
+            self.updateStatusBar(
+                'upload-image',
+                self.options.imageTexts.sbOnDragEnter,
+            );
             event.stopPropagation();
             event.preventDefault();
         });
         this.codemirror.on('dragend', function (cm, event) {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbInit);
+            self.updateStatusBar(
+                'upload-image',
+                self.options.imageTexts.sbInit,
+            );
             event.stopPropagation();
             event.preventDefault();
         });
         this.codemirror.on('dragleave', function (cm, event) {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbInit);
+            self.updateStatusBar(
+                'upload-image',
+                self.options.imageTexts.sbInit,
+            );
             event.stopPropagation();
             event.preventDefault();
         });
 
         this.codemirror.on('dragover', function (cm, event) {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbOnDragEnter);
+            self.updateStatusBar(
+                'upload-image',
+                self.options.imageTexts.sbOnDragEnter,
+            );
             event.stopPropagation();
             event.preventDefault();
         });
@@ -1926,7 +2374,10 @@ function EasyMDE(options) {
             event.stopPropagation();
             event.preventDefault();
             if (options.imageUploadFunction) {
-                self.uploadImagesUsingCustomFunction(options.imageUploadFunction, event.dataTransfer.files);
+                self.uploadImagesUsingCustomFunction(
+                    options.imageUploadFunction,
+                    event.dataTransfer.files,
+                );
             } else {
                 self.uploadImages(event.dataTransfer.files);
             }
@@ -1934,7 +2385,10 @@ function EasyMDE(options) {
 
         this.codemirror.on('paste', function (cm, event) {
             if (options.imageUploadFunction) {
-                self.uploadImagesUsingCustomFunction(options.imageUploadFunction, event.clipboardData.files);
+                self.uploadImagesUsingCustomFunction(
+                    options.imageUploadFunction,
+                    event.clipboardData.files,
+                );
             } else {
                 self.uploadImages(event.clipboardData.files);
             }
@@ -1962,7 +2416,13 @@ EasyMDE.prototype.uploadImages = function (files, onSuccess, onError) {
         names.push(files[i].name);
         this.uploadImage(files[i], onSuccess, onError);
     }
-    this.updateStatusBar('upload-image', this.options.imageTexts.sbOnDrop.replace('#images_names#', names.join(', ')));
+    this.updateStatusBar(
+        'upload-image',
+        this.options.imageTexts.sbOnDrop.replace(
+            '#images_names#',
+            names.join(', '),
+        ),
+    );
 };
 
 /**
@@ -1975,7 +2435,10 @@ EasyMDE.prototype.uploadImages = function (files, onSuccess, onError) {
  * @param imageUploadFunction {Function} The custom function to upload the image passed in options.
  * @param {FileList} files The files to upload the the server.
  */
-EasyMDE.prototype.uploadImagesUsingCustomFunction = function (imageUploadFunction, files) {
+EasyMDE.prototype.uploadImagesUsingCustomFunction = function (
+    imageUploadFunction,
+    files,
+) {
     if (files.length === 0) {
         return;
     }
@@ -1984,7 +2447,13 @@ EasyMDE.prototype.uploadImagesUsingCustomFunction = function (imageUploadFunctio
         names.push(files[i].name);
         this.uploadImageUsingCustomFunction(imageUploadFunction, files[i]);
     }
-    this.updateStatusBar('upload-image', this.options.imageTexts.sbOnDrop.replace('#images_names#', names.join(', ')));
+    this.updateStatusBar(
+        'upload-image',
+        this.options.imageTexts.sbOnDrop.replace(
+            '#images_names#',
+            names.join(', '),
+        ),
+    );
 };
 
 /**
@@ -1999,11 +2468,16 @@ EasyMDE.prototype.updateStatusBar = function (itemName, content) {
 
     var matchingClasses = this.gui.statusbar.getElementsByClassName(itemName);
     if (matchingClasses.length === 1) {
-        this.gui.statusbar.getElementsByClassName(itemName)[0].textContent = content;
+        this.gui.statusbar.getElementsByClassName(itemName)[0].textContent =
+            content;
     } else if (matchingClasses.length === 0) {
         console.log('EasyMDE: status bar item ' + itemName + ' was not found.');
     } else {
-        console.log('EasyMDE: Several status bar items named ' + itemName + ' was found.');
+        console.log(
+            'EasyMDE: Several status bar items named ' +
+                itemName +
+                ' was found.',
+        );
     }
 };
 
@@ -2014,21 +2488,32 @@ EasyMDE.prototype.markdown = function (text) {
     if (marked) {
         // Initialize
         var markedOptions;
-        if (this.options && this.options.renderingConfig && this.options.renderingConfig.markedOptions) {
+        if (
+            this.options &&
+            this.options.renderingConfig &&
+            this.options.renderingConfig.markedOptions
+        ) {
             markedOptions = this.options.renderingConfig.markedOptions;
         } else {
             markedOptions = {};
         }
 
         // Update options
-        if (this.options && this.options.renderingConfig && this.options.renderingConfig.singleLineBreaks === false) {
+        if (
+            this.options &&
+            this.options.renderingConfig &&
+            this.options.renderingConfig.singleLineBreaks === false
+        ) {
             markedOptions.breaks = false;
         } else {
             markedOptions.breaks = true;
         }
 
-        if (this.options && this.options.renderingConfig && this.options.renderingConfig.codeSyntaxHighlighting === true) {
-
+        if (
+            this.options &&
+            this.options.renderingConfig &&
+            this.options.renderingConfig.codeSyntaxHighlighting === true
+        ) {
             /* Get HLJS from config or window */
             var hljs = this.options.renderingConfig.hljs || window.hljs;
 
@@ -2051,8 +2536,14 @@ EasyMDE.prototype.markdown = function (text) {
         var htmlText = marked.parse(text);
 
         // Sanitize HTML
-        if (this.options.renderingConfig && typeof this.options.renderingConfig.sanitizerFunction === 'function') {
-            htmlText = this.options.renderingConfig.sanitizerFunction.call(this, htmlText);
+        if (
+            this.options.renderingConfig &&
+            typeof this.options.renderingConfig.sanitizerFunction === 'function'
+        ) {
+            htmlText = this.options.renderingConfig.sanitizerFunction.call(
+                this,
+                htmlText,
+            );
         }
 
         // Edit the HTML anchors to add 'target="_blank"' by default.
@@ -2121,7 +2612,14 @@ EasyMDE.prototype.render = function (el) {
     // CodeMirror overlay mode
     if (options.overlayMode) {
         CodeMirror.defineMode('overlay-mode', function (config) {
-            return CodeMirror.overlayMode(CodeMirror.getMode(config, options.spellChecker !== false ? 'spell-checker' : 'gfm'), options.overlayMode.mode, options.overlayMode.combine);
+            return CodeMirror.overlayMode(
+                CodeMirror.getMode(
+                    config,
+                    options.spellChecker !== false ? 'spell-checker' : 'gfm',
+                ),
+                options.overlayMode.mode,
+                options.overlayMode.combine,
+            );
         });
 
         mode = 'overlay-mode';
@@ -2159,23 +2657,39 @@ EasyMDE.prototype.render = function (el) {
     this.codemirror = CodeMirror.fromTextArea(el, {
         mode: mode,
         backdrop: backdrop,
-        theme: (options.theme != undefined) ? options.theme : 'easymde',
-        tabSize: (options.tabSize != undefined) ? options.tabSize : 2,
-        indentUnit: (options.tabSize != undefined) ? options.tabSize : 2,
-        indentWithTabs: (options.indentWithTabs === false) ? false : true,
-        lineNumbers: (options.lineNumbers === true) ? true : false,
-        autofocus: (options.autofocus === true) ? true : false,
+        theme: options.theme != undefined ? options.theme : 'easymde',
+        tabSize: options.tabSize != undefined ? options.tabSize : 2,
+        indentUnit: options.tabSize != undefined ? options.tabSize : 2,
+        indentWithTabs: options.indentWithTabs === false ? false : true,
+        lineNumbers: options.lineNumbers === true ? true : false,
+        autofocus: options.autofocus === true ? true : false,
         extraKeys: keyMaps,
         direction: options.direction,
-        lineWrapping: (options.lineWrapping === false) ? false : true,
+        lineWrapping: options.lineWrapping === false ? false : true,
         allowDropFileTypes: ['text/plain'],
-        placeholder: options.placeholder || el.getAttribute('placeholder') || '',
-        styleSelectedText: (options.styleSelectedText != undefined) ? options.styleSelectedText : !isMobile(),
-        scrollbarStyle: (options.scrollbarStyle != undefined) ? options.scrollbarStyle : 'native',
+        placeholder:
+            options.placeholder || el.getAttribute('placeholder') || '',
+        styleSelectedText:
+            options.styleSelectedText != undefined
+                ? options.styleSelectedText
+                : !isMobile(),
+        scrollbarStyle:
+            options.scrollbarStyle != undefined
+                ? options.scrollbarStyle
+                : 'native',
         configureMouse: configureMouse,
-        inputStyle: (options.inputStyle != undefined) ? options.inputStyle : isMobile() ? 'contenteditable' : 'textarea',
-        spellcheck: (options.nativeSpellcheck != undefined) ? options.nativeSpellcheck : true,
-        autoRefresh: (options.autoRefresh != undefined) ? options.autoRefresh : false,
+        inputStyle:
+            options.inputStyle != undefined
+                ? options.inputStyle
+                : isMobile()
+                  ? 'contenteditable'
+                  : 'textarea',
+        spellcheck:
+            options.nativeSpellcheck != undefined
+                ? options.nativeSpellcheck
+                : true,
+        autoRefresh:
+            options.autoRefresh != undefined ? options.autoRefresh : false,
     });
 
     this.codemirror.getScrollerElement().style.minHeight = options.minHeight;
@@ -2212,30 +2726,44 @@ EasyMDE.prototype.render = function (el) {
         this.autosave(); // use to load localstorage content
         this.codemirror.on('change', function () {
             clearTimeout(self._autosave_timeout);
-            self._autosave_timeout = setTimeout(function () {
-                self.autosave();
-            }, self.options.autosave.submit_delay || self.options.autosave.delay || 1000);
+            self._autosave_timeout = setTimeout(
+                function () {
+                    self.autosave();
+                },
+                self.options.autosave.submit_delay ||
+                    self.options.autosave.delay ||
+                    1000,
+            );
         });
     }
 
     function calcHeight(naturalWidth, naturalHeight) {
         var height;
-        var viewportWidth = window.getComputedStyle(document.querySelector('.CodeMirror-sizer')).width.replace('px', '');
+        var viewportWidth = window
+            .getComputedStyle(document.querySelector('.CodeMirror-sizer'))
+            .width.replace('px', '');
         if (naturalWidth < viewportWidth) {
             height = naturalHeight + 'px';
         } else {
-            height = (naturalHeight / naturalWidth * 100) + '%';
+            height = (naturalHeight / naturalWidth) * 100 + '%';
         }
         return height;
     }
 
     var _vm = this;
 
-
     function assignImageBlockAttributes(parentEl, img) {
-        var url = (new URL(img.url, document.baseURI)).href;
+        var url = new URL(img.url, document.baseURI).href;
         parentEl.setAttribute('data-img-src', url);
-        parentEl.setAttribute('style', '--bg-image:url(' + url + ');--width:' + img.naturalWidth + 'px;--height:' + calcHeight(img.naturalWidth, img.naturalHeight));
+        parentEl.setAttribute(
+            'style',
+            '--bg-image:url(' +
+                url +
+                ');--width:' +
+                img.naturalWidth +
+                'px;--height:' +
+                calcHeight(img.naturalWidth, img.naturalHeight),
+        );
         _vm.codemirror.setSize();
     }
 
@@ -2244,47 +2772,57 @@ EasyMDE.prototype.render = function (el) {
             return;
         }
 
-        easyMDEContainer.querySelectorAll('.cm-image-marker').forEach(function (e) {
-            var parentEl = e.parentElement;
-            if (!parentEl.innerText.match(/^!\[.*?\]\(.*\)/g)) {
-                // if img pasted on the same line with other text, don't preview, preview only images on separate line
-                return;
-            }
-            if (!parentEl.hasAttribute('data-img-src')) {
-                var srcAttr = parentEl.innerText.match(/!\[.*?\]\((.*?)\)/); // might require better parsing according to markdown spec
-                if (!window.EMDEimagesCache) {
-                    window.EMDEimagesCache = {};
+        easyMDEContainer
+            .querySelectorAll('.cm-image-marker')
+            .forEach(function (e) {
+                var parentEl = e.parentElement;
+                if (!parentEl.innerText.match(/^!\[.*?\]\(.*\)/g)) {
+                    // if img pasted on the same line with other text, don't preview, preview only images on separate line
+                    return;
                 }
+                if (!parentEl.hasAttribute('data-img-src')) {
+                    var srcAttr = parentEl.innerText.match(/!\[.*?\]\((.*?)\)/); // might require better parsing according to markdown spec
+                    if (!window.EMDEimagesCache) {
+                        window.EMDEimagesCache = {};
+                    }
 
-                if (srcAttr && srcAttr.length >= 2) {
-                    var keySrc = srcAttr[1];
+                    if (srcAttr && srcAttr.length >= 2) {
+                        var keySrc = srcAttr[1];
 
-                    if (options.imagesPreviewHandler) {
-                        var newSrc = options.imagesPreviewHandler(srcAttr[1]);
-                        // defensive check making sure the handler provided by the user returns a string
-                        if (typeof newSrc === 'string') {
-                            keySrc = newSrc;
+                        if (options.imagesPreviewHandler) {
+                            var newSrc = options.imagesPreviewHandler(
+                                srcAttr[1],
+                            );
+                            // defensive check making sure the handler provided by the user returns a string
+                            if (typeof newSrc === 'string') {
+                                keySrc = newSrc;
+                            }
+                        }
+
+                        if (!window.EMDEimagesCache[keySrc]) {
+                            window.EMDEimagesCache[keySrc] = {};
+                            var img = document.createElement('img');
+                            img.onload = function () {
+                                window.EMDEimagesCache[keySrc] = {
+                                    naturalWidth: img.naturalWidth,
+                                    naturalHeight: img.naturalHeight,
+                                    url: keySrc,
+                                };
+                                assignImageBlockAttributes(
+                                    parentEl,
+                                    window.EMDEimagesCache[keySrc],
+                                );
+                            };
+                            img.src = keySrc;
+                        } else {
+                            assignImageBlockAttributes(
+                                parentEl,
+                                window.EMDEimagesCache[keySrc],
+                            );
                         }
                     }
-
-                    if (!window.EMDEimagesCache[keySrc]) {
-                        window.EMDEimagesCache[keySrc] = {};
-                        var img = document.createElement('img');
-                        img.onload = function () {
-                            window.EMDEimagesCache[keySrc] = {
-                                naturalWidth: img.naturalWidth,
-                                naturalHeight: img.naturalHeight,
-                                url: keySrc,
-                            };
-                            assignImageBlockAttributes(parentEl, window.EMDEimagesCache[keySrc]);
-                        };
-                        img.src = keySrc;
-                    } else {
-                        assignImageBlockAttributes(parentEl, window.EMDEimagesCache[keySrc]);
-                    }
                 }
-            }
-        });
+            });
     }
 
     this.codemirror.on('update', function () {
@@ -2300,9 +2838,12 @@ EasyMDE.prototype.render = function (el) {
 
     // Fixes CodeMirror bug (#344)
     var temp_cm = this.codemirror;
-    setTimeout(function () {
-        temp_cm.refresh();
-    }.bind(temp_cm), 0);
+    setTimeout(
+        function () {
+            temp_cm.refresh();
+        }.bind(temp_cm),
+        0,
+    );
 };
 
 EasyMDE.prototype.cleanup = function () {
@@ -2329,18 +2870,28 @@ EasyMDE.prototype.autosave = function () {
     if (isLocalStorageAvailable()) {
         var easyMDE = this;
 
-        if (this.options.autosave.uniqueId == undefined || this.options.autosave.uniqueId == '') {
-            console.log('EasyMDE: You must set a uniqueId to use the autosave feature');
+        if (
+            this.options.autosave.uniqueId == undefined ||
+            this.options.autosave.uniqueId == ''
+        ) {
+            console.log(
+                'EasyMDE: You must set a uniqueId to use the autosave feature',
+            );
             return;
         }
 
         if (this.options.autosave.binded !== true) {
-            if (easyMDE.element.form != null && easyMDE.element.form != undefined) {
+            if (
+                easyMDE.element.form != null &&
+                easyMDE.element.form != undefined
+            ) {
                 easyMDE.element.form.addEventListener('submit', function () {
                     clearTimeout(easyMDE.autosaveTimeoutId);
                     easyMDE.autosaveTimeoutId = undefined;
 
-                    localStorage.removeItem('smde_' + easyMDE.options.autosave.uniqueId);
+                    localStorage.removeItem(
+                        'smde_' + easyMDE.options.autosave.uniqueId,
+                    );
                 });
             }
 
@@ -2348,8 +2899,19 @@ EasyMDE.prototype.autosave = function () {
         }
 
         if (this.options.autosave.loaded !== true) {
-            if (typeof localStorage.getItem('smde_' + this.options.autosave.uniqueId) == 'string' && localStorage.getItem('smde_' + this.options.autosave.uniqueId) != '') {
-                this.codemirror.setValue(localStorage.getItem('smde_' + this.options.autosave.uniqueId));
+            if (
+                typeof localStorage.getItem(
+                    'smde_' + this.options.autosave.uniqueId,
+                ) == 'string' &&
+                localStorage.getItem(
+                    'smde_' + this.options.autosave.uniqueId,
+                ) != ''
+            ) {
+                this.codemirror.setValue(
+                    localStorage.getItem(
+                        'smde_' + this.options.autosave.uniqueId,
+                    ),
+                );
                 this.options.autosave.foundSavedValue = true;
             }
 
@@ -2358,7 +2920,10 @@ EasyMDE.prototype.autosave = function () {
 
         var value = easyMDE.value();
         if (value !== '') {
-            localStorage.setItem('smde_' + this.options.autosave.uniqueId, value);
+            localStorage.setItem(
+                'smde_' + this.options.autosave.uniqueId,
+                value,
+            );
         } else {
             localStorage.removeItem('smde_' + this.options.autosave.uniqueId);
         }
@@ -2366,8 +2931,14 @@ EasyMDE.prototype.autosave = function () {
         var el = document.getElementById('autosaved');
         if (el != null && el != undefined && el != '') {
             var d = new Date();
-            var dd = new Intl.DateTimeFormat([this.options.autosave.timeFormat.locale, 'en-US'], this.options.autosave.timeFormat.format).format(d);
-            var save = this.options.autosave.text == undefined ? 'Autosaved: ' : this.options.autosave.text;
+            var dd = new Intl.DateTimeFormat(
+                [this.options.autosave.timeFormat.locale, 'en-US'],
+                this.options.autosave.timeFormat.format,
+            ).format(d);
+            var save =
+                this.options.autosave.text == undefined
+                    ? 'Autosaved: '
+                    : this.options.autosave.text;
 
             el.innerHTML = save + dd;
         }
@@ -2378,8 +2949,14 @@ EasyMDE.prototype.autosave = function () {
 
 EasyMDE.prototype.clearAutosavedValue = function () {
     if (isLocalStorageAvailable()) {
-        if (this.options.autosave == undefined || this.options.autosave.uniqueId == undefined || this.options.autosave.uniqueId == '') {
-            console.log('EasyMDE: You must set a uniqueId to clear the autosave value');
+        if (
+            this.options.autosave == undefined ||
+            this.options.autosave.uniqueId == undefined ||
+            this.options.autosave.uniqueId == ''
+        ) {
+            console.log(
+                'EasyMDE: You must set a uniqueId to clear the autosave value',
+            );
             return;
         }
 
@@ -2400,7 +2977,10 @@ EasyMDE.prototype.openBrowseFileWindow = function (onSuccess, onError) {
     imageInput.click(); //dispatchEvent(new MouseEvent('click'));  // replaced with click() for IE11 compatibility.
     function onChange(event) {
         if (self.options.imageUploadFunction) {
-            self.uploadImagesUsingCustomFunction(self.options.imageUploadFunction, event.target.files);
+            self.uploadImagesUsingCustomFunction(
+                self.options.imageUploadFunction,
+                event.target.files,
+            );
         } else {
             self.uploadImages(event.target.files, onSuccess, onError);
         }
@@ -2421,16 +3001,21 @@ EasyMDE.prototype.openBrowseFileWindow = function (onSuccess, onError) {
  */
 EasyMDE.prototype.uploadImage = function (file, onSuccess, onError) {
     var self = this;
-    onSuccess = onSuccess || function onSuccess(imageUrl) {
-        afterImageUploaded(self, imageUrl);
-    };
+    onSuccess =
+        onSuccess ||
+        function onSuccess(imageUrl) {
+            afterImageUploaded(self, imageUrl);
+        };
 
     function onErrorSup(errorMessage) {
         // show error on status bar and reset after 10000ms
         self.updateStatusBar('upload-image', errorMessage);
 
         setTimeout(function () {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbInit);
+            self.updateStatusBar(
+                'upload-image',
+                self.options.imageTexts.sbInit,
+            );
         }, 10000);
 
         // run custom error handler
@@ -2446,7 +3031,10 @@ EasyMDE.prototype.uploadImage = function (file, onSuccess, onError) {
         return errorMessage
             .replace('#image_name#', file.name)
             .replace('#image_size#', humanFileSize(file.size, units))
-            .replace('#image_max_size#', humanFileSize(self.options.imageMaxSize, units));
+            .replace(
+                '#image_max_size#',
+                humanFileSize(self.options.imageMaxSize, units),
+            );
     }
 
     if (file.size > this.options.imageMaxSize) {
@@ -2459,21 +3047,32 @@ EasyMDE.prototype.uploadImage = function (file, onSuccess, onError) {
 
     // insert CSRF body token if provided in config.
     if (self.options.imageCSRFToken && !self.options.imageCSRFHeader) {
-        formData.append(self.options.imageCSRFName, self.options.imageCSRFToken);
+        formData.append(
+            self.options.imageCSRFName,
+            self.options.imageCSRFToken,
+        );
     }
 
     var request = new XMLHttpRequest();
     request.upload.onprogress = function (event) {
         if (event.lengthComputable) {
             var progress = '' + Math.round((event.loaded * 100) / event.total);
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbProgress.replace('#file_name#', file.name).replace('#progress#', progress));
+            self.updateStatusBar(
+                'upload-image',
+                self.options.imageTexts.sbProgress
+                    .replace('#file_name#', file.name)
+                    .replace('#progress#', progress),
+            );
         }
     };
     request.open('POST', this.options.imageUploadEndpoint);
 
     // insert CSRF header token if provided in config.
     if (self.options.imageCSRFToken && self.options.imageCSRFHeader) {
-        request.setRequestHeader(self.options.imageCSRFName, self.options.imageCSRFToken);
+        request.setRequestHeader(
+            self.options.imageCSRFName,
+            self.options.imageCSRFToken,
+        );
     }
 
     request.onload = function () {
@@ -2481,32 +3080,65 @@ EasyMDE.prototype.uploadImage = function (file, onSuccess, onError) {
             var response = JSON.parse(this.responseText);
         } catch (error) {
             console.error('EasyMDE: The server did not return a valid json.');
-            onErrorSup(fillErrorMessage(self.options.errorMessages.importError));
+            onErrorSup(
+                fillErrorMessage(self.options.errorMessages.importError),
+            );
             return;
         }
-        if (this.status === 200 && response && !response.error && response.data && response.data.filePath) {
-            onSuccess((self.options.imagePathAbsolute ? '' : (window.location.origin + '/')) + response.data.filePath);
+        if (
+            this.status === 200 &&
+            response &&
+            !response.error &&
+            response.data &&
+            response.data.filePath
+        ) {
+            onSuccess(
+                (self.options.imagePathAbsolute
+                    ? ''
+                    : window.location.origin + '/') + response.data.filePath,
+            );
         } else {
-            if (response.error && response.error in self.options.errorMessages) {  // preformatted error message
-                onErrorSup(fillErrorMessage(self.options.errorMessages[response.error]));
-            } else if (response.error) {  // server side generated error message
+            if (
+                response.error &&
+                response.error in self.options.errorMessages
+            ) {
+                // preformatted error message
+                onErrorSup(
+                    fillErrorMessage(
+                        self.options.errorMessages[response.error],
+                    ),
+                );
+            } else if (response.error) {
+                // server side generated error message
                 onErrorSup(fillErrorMessage(response.error));
-            } else {  //unknown error
-                console.error('EasyMDE: Received an unexpected response after uploading the image.'
-                    + this.status + ' (' + this.statusText + ')');
-                onErrorSup(fillErrorMessage(self.options.errorMessages.importError));
+            } else {
+                //unknown error
+                console.error(
+                    'EasyMDE: Received an unexpected response after uploading the image.' +
+                        this.status +
+                        ' (' +
+                        this.statusText +
+                        ')',
+                );
+                onErrorSup(
+                    fillErrorMessage(self.options.errorMessages.importError),
+                );
             }
         }
     };
 
     request.onerror = function (event) {
-        console.error('EasyMDE: An unexpected error occurred when trying to upload the image.'
-            + event.target.status + ' (' + event.target.statusText + ')');
+        console.error(
+            'EasyMDE: An unexpected error occurred when trying to upload the image.' +
+                event.target.status +
+                ' (' +
+                event.target.statusText +
+                ')',
+        );
         onErrorSup(self.options.errorMessages.importError);
     };
 
     request.send(formData);
-
 };
 
 /**
@@ -2515,7 +3147,10 @@ EasyMDE.prototype.uploadImage = function (file, onSuccess, onError) {
  * @param imageUploadFunction {Function} The custom function to upload the image passed in options
  * @param file {File} The image to upload, as a HTML5 File object (https://developer.mozilla.org/en-US/docs/Web/API/File).
  */
-EasyMDE.prototype.uploadImageUsingCustomFunction = function (imageUploadFunction, file) {
+EasyMDE.prototype.uploadImageUsingCustomFunction = function (
+    imageUploadFunction,
+    file,
+) {
     var self = this;
 
     function onSuccess(imageUrl) {
@@ -2528,7 +3163,10 @@ EasyMDE.prototype.uploadImageUsingCustomFunction = function (imageUploadFunction
         self.updateStatusBar('upload-image', filledErrorMessage);
 
         setTimeout(function () {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbInit);
+            self.updateStatusBar(
+                'upload-image',
+                self.options.imageTexts.sbInit,
+            );
         }, 10000);
 
         // run error handler from options, this alerts the message.
@@ -2540,7 +3178,10 @@ EasyMDE.prototype.uploadImageUsingCustomFunction = function (imageUploadFunction
         return errorMessage
             .replace('#image_name#', file.name)
             .replace('#image_size#', humanFileSize(file.size, units))
-            .replace('#image_max_size#', humanFileSize(self.options.imageMaxSize, units));
+            .replace(
+                '#image_max_size#',
+                humanFileSize(self.options.imageMaxSize, units),
+            );
     }
 
     imageUploadFunction.apply(this, [file, onSuccess, onError]);
@@ -2553,9 +3194,12 @@ EasyMDE.prototype.setPreviewMaxHeight = function () {
 
     // Calc preview max height
     var paddingTop = parseInt(window.getComputedStyle(wrapper).paddingTop);
-    var borderTopWidth = parseInt(window.getComputedStyle(wrapper).borderTopWidth);
+    var borderTopWidth = parseInt(
+        window.getComputedStyle(wrapper).borderTopWidth,
+    );
     var optionsMaxHeight = parseInt(this.options.maxHeight);
-    var wrapperMaxHeight = optionsMaxHeight + paddingTop * 2 + borderTopWidth * 2;
+    var wrapperMaxHeight =
+        optionsMaxHeight + paddingTop * 2 + borderTopWidth * 2;
     var previewMaxHeight = wrapperMaxHeight.toString() + 'px';
 
     preview.style.height = previewMaxHeight;
@@ -2571,12 +3215,10 @@ EasyMDE.prototype.createSideBySide = function () {
         preview.className = 'editor-preview-side';
 
         if (this.options.previewClass) {
-
             if (Array.isArray(this.options.previewClass)) {
                 for (var i = 0; i < this.options.previewClass.length; i++) {
                     preview.classList.add(this.options.previewClass[i]);
                 }
-
             } else if (typeof this.options.previewClass === 'string') {
                 preview.classList.add(this.options.previewClass);
             }
@@ -2614,7 +3256,9 @@ EasyMDE.prototype.createSideBySide = function () {
         cScroll = true;
         var height = preview.scrollHeight - preview.clientHeight;
         var ratio = parseFloat(preview.scrollTop) / height;
-        var move = (cm.getScrollInfo().height - cm.getScrollInfo().clientHeight) * ratio;
+        var move =
+            (cm.getScrollInfo().height - cm.getScrollInfo().clientHeight) *
+            ratio;
         cm.scrollTo(0, move);
     };
     return preview;
@@ -2646,29 +3290,37 @@ EasyMDE.prototype.createToolbar = function (items) {
         if (items[i].name == 'guide' && self.options.toolbarGuideIcon === false)
             continue;
 
-        if (self.options.hideIcons && self.options.hideIcons.indexOf(items[i].name) != -1)
+        if (
+            self.options.hideIcons &&
+            self.options.hideIcons.indexOf(items[i].name) != -1
+        )
             continue;
 
         // Fullscreen does not work well on mobile devices (even tablets)
         // In the future, hopefully this can be resolved
-        if ((items[i].name == 'fullscreen' || items[i].name == 'side-by-side') && isMobile())
+        if (
+            (items[i].name == 'fullscreen' ||
+                items[i].name == 'side-by-side') &&
+            isMobile()
+        )
             continue;
-
 
         // Don't include trailing separators
         if (items[i] === '|') {
             var nonSeparatorIconsFollow = false;
 
-            for (var x = (i + 1); x < items.length; x++) {
-                if (items[x] !== '|' && (!self.options.hideIcons || self.options.hideIcons.indexOf(items[x].name) == -1)) {
+            for (var x = i + 1; x < items.length; x++) {
+                if (
+                    items[x] !== '|' &&
+                    (!self.options.hideIcons ||
+                        self.options.hideIcons.indexOf(items[x].name) == -1)
+                ) {
                     nonSeparatorIconsFollow = true;
                 }
             }
 
-            if (!nonSeparatorIconsFollow)
-                continue;
+            if (!nonSeparatorIconsFollow) continue;
         }
-
 
         // Create the icon and append to the toolbar
         (function (item) {
@@ -2676,11 +3328,22 @@ EasyMDE.prototype.createToolbar = function (items) {
             if (item === '|') {
                 el = createSep();
             } else if (item.children) {
-                el = createToolbarDropdown(item, self.options.toolbarTips, self.options.shortcuts, self);
+                el = createToolbarDropdown(
+                    item,
+                    self.options.toolbarTips,
+                    self.options.shortcuts,
+                    self,
+                );
             } else {
-                el = createToolbarButton(item, true, self.options.toolbarTips, self.options.shortcuts, 'button', self);
+                el = createToolbarButton(
+                    item,
+                    true,
+                    self.options.toolbarTips,
+                    self.options.shortcuts,
+                    'button',
+                    self,
+                );
             }
-
 
             toolbarData[item.name || item] = el;
             bar.appendChild(el);
@@ -2746,7 +3409,6 @@ EasyMDE.prototype.createStatusbar = function (status) {
         onActivity = undefined;
         defaultValue = undefined;
 
-
         // Handle if custom or not
         if (typeof status[i] === 'object') {
             items.push({
@@ -2784,7 +3446,10 @@ EasyMDE.prototype.createStatusbar = function (status) {
                 };
             } else if (name === 'autosave') {
                 defaultValue = function (el) {
-                    if (options.autosave != undefined && options.autosave.enabled === true) {
+                    if (
+                        options.autosave != undefined &&
+                        options.autosave.enabled === true
+                    ) {
                         el.setAttribute('id', 'autosaved');
                     }
                 };
@@ -2803,52 +3468,51 @@ EasyMDE.prototype.createStatusbar = function (status) {
         }
     }
 
-
     // Create element for the status bar
     var bar = document.createElement('div');
     bar.className = 'editor-statusbar';
-
 
     // Create a new span for each item
     for (i = 0; i < items.length; i++) {
         // Store in temporary variable
         var item = items[i];
 
-
         // Create span element
         var el = document.createElement('span');
         el.className = item.className;
-
 
         // Ensure the defaultValue is a function
         if (typeof item.defaultValue === 'function') {
             item.defaultValue(el);
         }
 
-
         // Ensure the onUpdate is a function
         if (typeof item.onUpdate === 'function') {
             // Create a closure around the span of the current action, then execute the onUpdate handler
-            this.codemirror.on('update', (function (el, item) {
-                return function () {
-                    item.onUpdate(el);
-                };
-            }(el, item)));
+            this.codemirror.on(
+                'update',
+                (function (el, item) {
+                    return function () {
+                        item.onUpdate(el);
+                    };
+                })(el, item),
+            );
         }
         if (typeof item.onActivity === 'function') {
             // Create a closure around the span of the current action, then execute the onActivity handler
-            this.codemirror.on('cursorActivity', (function (el, item) {
-                return function () {
-                    item.onActivity(el);
-                };
-            }(el, item)));
+            this.codemirror.on(
+                'cursorActivity',
+                (function (el, item) {
+                    return function () {
+                        item.onActivity(el);
+                    };
+                })(el, item),
+            );
         }
-
 
         // Append the item to the status bar
         bar.appendChild(el);
     }
-
 
     // Insert the status bar into the DOM
     var cmWrapper = this.codemirror.getWrapperElement();
@@ -2872,12 +3536,10 @@ EasyMDE.prototype.value = function (val) {
             if (preview_result !== null) {
                 preview.innerHTML = preview_result;
             }
-
         }
         return this;
     }
 };
-
 
 /**
  * Bind static methods for exports.

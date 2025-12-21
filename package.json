@@ -23,6 +23,7 @@
         "@types/marked": "^4.0.7",
         "codemirror": "^5.65.15",
         "codemirror-spell-checker": "1.1.2",
+        "filepond": "^4.32.10",
         "marked": "^4.1.0"
     },
     "devDependencies": {
