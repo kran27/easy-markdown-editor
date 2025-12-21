@@ -15,6 +15,13 @@ var CodeMirrorSpellChecker = require('codemirror-spell-checker');
 var marked = require('marked').marked;
 
 var FilePond = require('filepond');
+var FilePondPluginFileValidateType = require('filepond-plugin-file-validate-type');
+var FilePondPluginFileValidateSize = require('filepond-plugin-file-validate-size');
+
+FilePond.registerPlugin(
+    FilePondPluginFileValidateType,
+    FilePondPluginFileValidateSize,
+);
 
 // Some variables
 var isMac = /Mac/.test(navigator.platform);
