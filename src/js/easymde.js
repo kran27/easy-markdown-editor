@@ -84,7 +84,7 @@ async function renderMarkdown(markdown, object) {
       <div class="image-picker-backdrop"></div>
       <div class="image-picker-panel">
         <div class="image-picker-header">
-          <h3>Select image</h3>
+          <h3>Select Media</h3>
           <button class="close-btn btn" title="Close">&times;</button>
         </div>
         <div class="image-picker-body">
@@ -104,8 +104,8 @@ async function renderMarkdown(markdown, object) {
 
         const pond = FilePond.create(document.querySelector('input.filepond'), {
             allowMultiple: true,
-            maxFileSize: '5MB',
-            acceptedFileTypes: ['image/*'],
+            maxFileSize: '500MB',
+            acceptedFileTypes: ['image/*', 'video/*'],
 
             server: {
                 process: {
@@ -150,11 +150,39 @@ async function renderMarkdown(markdown, object) {
         item.className = 'image-item';
         item.setAttribute('role', 'listitem');
 
-        const img = document.createElement('img');
-        img.src = meta.url + '?width=300&height=150&quality=60';
-        img.alt = meta.niceName || meta.originalFileName;
-        img.loading = 'lazy';
-        img.className = 'image-thumb';
+        const isVideo = /\.(mp4|webm|mov)$/i.test(meta.niceName || meta.originalFileName);
+        let img;
+        if (meta.thumbnailUrl) {
+            img = document.createElement('img');
+            img.src = meta.thumbnailUrl;
+            img.alt = meta.niceName || meta.originalFileName;
+            img.loading = 'lazy';
+            img.className = 'image-thumb';
+            // Add video overlay icon if it's a video
+            if (isVideo) {
+                const container = document.createElement('div');
+                container.className = 'image-thumb-container position-relative';
+                container.appendChild(img);
+                const icon = document.createElement('div');
+                icon.className = 'position-absolute top-50 start-50 translate-middle text-white';
+                icon.innerHTML = '<i class="fa-solid fa-play fa-2x drop-shadow"></i>';
+                container.appendChild(icon);
+                img = container;
+            }
+        } else if (isVideo) {
+            img = document.createElement('div');
+            img.className = 'image-thumb d-flex align-items-center justify-content-center bg-secondary text-white';
+            img.style.display = 'flex';
+            img.style.alignItems = 'center';
+            img.style.justifyContent = 'center';
+            img.innerHTML = '<i class="fa-solid fa-film fa-3x"></i>';
+        } else {
+            img = document.createElement('img');
+            img.src = meta.url + '?width=300&height=150&quality=60';
+            img.alt = meta.niceName || meta.originalFileName;
+            img.loading = 'lazy';
+            img.className = 'image-thumb';
+        }
 
         const title = document.createElement('div');
         title.className = 'image-title';
@@ -1300,7 +1328,14 @@ function drawImage(editor) {
     window.openImagePicker((meta) => {
         var options = editor.options;
         var url = meta.url;
-        _toggleLink(editor, 'image', options.insertTexts.image, url);
+        if (/\.(mp4|webm|mov)$/i.test(url)) {
+            var cm = editor.codemirror;
+            var stat = getState(cm);
+            var posterAttr = meta.thumbnailUrl ? ` poster="${meta.thumbnailUrl}"` : '';
+            _replaceSelection(cm, stat.image, [`<video controls width="100%" src="${url}"${posterAttr}></video>`, '']);
+        } else {
+            _toggleLink(editor, 'image', options.insertTexts.image, url);
+        }
     });
 }
 
@@ -2652,8 +2687,8 @@ EasyMDE.prototype.updateStatusBar = function (itemName, content) {
     } else {
         console.log(
             'EasyMDE: Several status bar items named ' +
-                itemName +
-                ' was found.',
+            itemName +
+            ' was found.',
         );
     }
 };
@@ -2859,8 +2894,8 @@ EasyMDE.prototype.render = function (el) {
             options.inputStyle != undefined
                 ? options.inputStyle
                 : isMobile()
-                  ? 'contenteditable'
-                  : 'textarea',
+                    ? 'contenteditable'
+                    : 'textarea',
         spellcheck:
             options.nativeSpellcheck != undefined
                 ? options.nativeSpellcheck
@@ -2908,8 +2943,8 @@ EasyMDE.prototype.render = function (el) {
                     self.autosave();
                 },
                 self.options.autosave.submit_delay ||
-                    self.options.autosave.delay ||
-                    1000,
+                self.options.autosave.delay ||
+                1000,
             );
         });
     }
@@ -2935,11 +2970,11 @@ EasyMDE.prototype.render = function (el) {
         parentEl.setAttribute(
             'style',
             '--bg-image:url(' +
-                url +
-                ');--width:' +
-                img.naturalWidth +
-                'px;--height:' +
-                calcHeight(img.naturalWidth, img.naturalHeight),
+            url +
+            ');--width:' +
+            img.naturalWidth +
+            'px;--height:' +
+            calcHeight(img.naturalWidth, img.naturalHeight),
         );
         _vm.codemirror.setSize();
     }
@@ -3292,10 +3327,10 @@ EasyMDE.prototype.uploadImage = function (file, onSuccess, onError) {
                 //unknown error
                 console.error(
                     'EasyMDE: Received an unexpected response after uploading the image.' +
-                        this.status +
-                        ' (' +
-                        this.statusText +
-                        ')',
+                    this.status +
+                    ' (' +
+                    this.statusText +
+                    ')',
                 );
                 onErrorSup(
                     fillErrorMessage(self.options.errorMessages.importError),
@@ -3307,10 +3342,10 @@ EasyMDE.prototype.uploadImage = function (file, onSuccess, onError) {
     request.onerror = function (event) {
         console.error(
             'EasyMDE: An unexpected error occurred when trying to upload the image.' +
-                event.target.status +
-                ' (' +
-                event.target.statusText +
-                ')',
+            event.target.status +
+            ' (' +
+            event.target.statusText +
+            ')',
         );
         onErrorSup(self.options.errorMessages.importError);
     };
