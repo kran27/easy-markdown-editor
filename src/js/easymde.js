@@ -2726,11 +2726,20 @@ EasyMDE.prototype.markdown = function (text) {
             this.options.renderingConfig &&
             this.options.renderingConfig.codeSyntaxHighlighting === true
         ) {
-            /* Get HLJS from config or window */
+            /* Get HLJS/Prism from config or window */
             var hljs = this.options.renderingConfig.hljs || window.hljs;
+            var prism = this.options.renderingConfig.prism || window.Prism;
 
-            /* Check if HLJS loaded */
-            if (hljs) {
+            /* Check if HLJS/Prism loaded */
+            if (prism) {
+                markedOptions.highlight = function (code, language) {
+                    if (language && prism.languages[language]) {
+                        return prism.highlight(code, prism.languages[language], language);
+                    } else {
+                        return code;
+                    }
+                };
+            } else if (hljs) {
                 markedOptions.highlight = function (code, language) {
                     if (language && hljs.getLanguage(language)) {
                         return hljs.highlight(language, code).value;
